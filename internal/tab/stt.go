@@ -1,0 +1,263 @@
+package tab
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type Endpoint struct {
+	URL   string
+	Model string
+}
+
+var DefaultEndpoints = []Endpoint{}
+
+type Segment struct {
+	AudioStartMs float64 `json:"audioStartMs"`
+	AudioEndMs   float64 `json:"audioEndMs"`
+	T            float64 `json:"t"`
+	EndT         float64 `json:"endT"`
+	Text         string  `json:"text"`
+}
+
+type rawSegment struct {
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+	Text  string  `json:"text"`
+}
+
+type Transcript struct {
+	OK           bool         `json:"ok"`
+	Reason       string       `json:"reason,omitempty"`
+	Backend      string       `json:"backend,omitempty"`
+	Endpoint     string       `json:"endpoint,omitempty"`
+	Model        string       `json:"model,omitempty"`
+	Granularity  string       `json:"granularity,omitempty"`
+	Language     string       `json:"language,omitempty"`
+	Segments     []Segment    `json:"segments"`
+	RawSegments  []rawSegment `json:"-"`
+	AccuracyNote string       `json:"accuracyNote,omitempty"`
+	VADCorrected bool         `json:"vadCorrected"`
+	VADReason    string       `json:"vadReason,omitempty"`
+	Attempts     []Attempt    `json:"attempts,omitempty"`
+
+	retryable bool
+}
+
+type Attempt struct {
+	URL    string `json:"url"`
+	Model  string `json:"model"`
+	Reason string `json:"reason"`
+}
+
+type STTOptions struct {
+	Endpoints []Endpoint
+	Model     string
+	APIKey    string
+	Language  string
+	Timeout   time.Duration
+}
+
+func TranscribeFallback(clock *Clock, wavPath string, opts STTOptions) Transcript {
+	eps := opts.Endpoints
+	if len(eps) == 0 {
+		eps = DefaultEndpoints
+	}
+
+	var attempts []Attempt
+	for _, ep := range eps {
+		model := ep.Model
+		if opts.Model != "" {
+			model = opts.Model
+		}
+		t := transcribeOne(clock, wavPath, ep.URL, model, opts)
+		if t.OK {
+			t.Attempts = attempts
+			return t
+		}
+		attempts = append(attempts, Attempt{URL: ep.URL, Model: model, Reason: t.Reason})
+		if !t.retryable {
+			break
+		}
+	}
+
+	reason := "no remote STT endpoint configured (--stt-url, or [transcription.remote] endpoint in ~/.config/recgo/config.toml)"
+	if len(attempts) == 1 {
+		reason = attempts[0].Reason
+	} else if len(attempts) > 1 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "all %d STT endpoints failed:", len(attempts))
+		for _, a := range attempts {
+			fmt.Fprintf(&b, "\n  - %s", a.Reason)
+		}
+		reason = b.String()
+	}
+	return Transcript{Reason: reason, Attempts: attempts}
+}
+
+func transcribeOne(clock *Clock, wavPath, baseURL, model string, opts STTOptions) Transcript {
+	if !clock.AudioAnchored() {
+		return Transcript{Reason: "no audio was captured, so nothing can be aligned"}
+	}
+
+	endpoint := strings.TrimRight(baseURL, "/") + "/audio/transcriptions"
+
+	f, err := os.Open(wavPath)
+	if err != nil {
+		return Transcript{Reason: fmt.Sprintf("open %s: %v", wavPath, err), retryable: false}
+	}
+	defer f.Close()
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("file", filepath.Base(wavPath))
+	if err != nil {
+		return Transcript{Reason: err.Error()}
+	}
+	if _, err := io.Copy(part, f); err != nil {
+		return Transcript{Reason: err.Error()}
+	}
+	mw.WriteField("model", model)
+	mw.WriteField("response_format", "verbose_json")
+	mw.WriteField("timestamp_granularities[]", "word")
+	mw.WriteField("timestamp_granularities[]", "segment")
+	if opts.Language != "" {
+		mw.WriteField("language", opts.Language)
+	}
+	mw.Close()
+
+	timeout := opts.Timeout
+	if timeout == 0 {
+		timeout = 2 * time.Minute
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, &body)
+	if err != nil {
+		return Transcript{Reason: err.Error()}
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if opts.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.APIKey)
+	}
+
+	res, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return Transcript{Reason: fmt.Sprintf("could not reach %s: %v", endpoint, err), retryable: true}
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(res.Body, 400))
+		msg := fmt.Sprintf("%s returned %d", endpoint, res.StatusCode)
+		if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+			msg += " — set --stt-api-key or OPENAI_API_KEY"
+		}
+		if len(snippet) > 0 {
+			msg += ": " + strings.TrimSpace(string(snippet))
+		}
+		retry := res.StatusCode != http.StatusBadRequest && res.StatusCode != http.StatusUnprocessableEntity
+		return Transcript{Reason: msg, retryable: retry}
+	}
+
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return Transcript{Reason: err.Error(), retryable: true}
+	}
+
+	var payload struct {
+		Text     string `json:"text"`
+		Language string `json:"language"`
+		Words    []struct {
+			Word  string  `json:"word"`
+			Start float64 `json:"start"`
+			End   float64 `json:"end"`
+		} `json:"words"`
+		Segments []rawSegment `json:"segments"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return Transcript{Reason: fmt.Sprintf("response was not JSON: %v", err), retryable: true}
+	}
+
+	mk := func(startSec, endSec float64, text string) Segment {
+		t, _ := clock.FromAudioTime(startSec)
+		e, _ := clock.FromAudioTime(endSec)
+		return Segment{
+			AudioStartMs: startSec * 1000, AudioEndMs: endSec * 1000,
+			T: t, EndT: e, Text: strings.TrimSpace(text),
+		}
+	}
+
+	out := Transcript{OK: true, Backend: "openai", Endpoint: endpoint, Model: model,
+		Language: payload.Language, RawSegments: payload.Segments}
+
+	switch {
+	case len(payload.Words) > 0:
+		out.Granularity = "word"
+		for _, w := range payload.Words {
+			out.Segments = append(out.Segments, mk(w.Start, w.End, w.Word))
+		}
+		out.AccuracyNote = "Word-level timestamps from the STT server; alignment is as good as the model."
+	case len(payload.Segments) > 0:
+		out.Granularity = "segment"
+		for _, s := range payload.Segments {
+			out.Segments = append(out.Segments, mk(s.Start, s.End, s.Text))
+		}
+		out.AccuracyNote = "Server returned segment-level timestamps only — narration attributes " +
+			"to the right click, but sub-second alignment within a sentence is not available."
+	case strings.TrimSpace(payload.Text) != "":
+		out.Granularity = "none"
+		out.Segments = []Segment{mk(0, 0, payload.Text)}
+		out.AccuracyNote = "Server returned untimed text. Every line is pinned to the start of " +
+			"the recording; do NOT trust narration timestamps."
+	}
+
+	filtered := out.Segments[:0]
+	for _, s := range out.Segments {
+		if s.Text != "" {
+			filtered = append(filtered, s)
+		}
+	}
+	out.Segments = filtered
+	return out
+}
+
+type Utterance struct {
+	T    float64
+	EndT float64
+	Text string
+}
+
+func ToUtterances(segments []Segment, gapMs, maxWordMs float64) []Utterance {
+	if gapMs <= 0 {
+		gapMs = 350
+	}
+	if maxWordMs <= 0 {
+		maxWordMs = 700
+	}
+
+	var out []Utterance
+	var lastEffectiveEnd float64
+	for _, s := range segments {
+		effEnd := s.EndT
+		if s.T+maxWordMs < effEnd {
+			effEnd = s.T + maxWordMs
+		}
+		if len(out) > 0 && s.T-lastEffectiveEnd <= gapMs {
+			u := &out[len(out)-1]
+			u.Text = strings.TrimSpace(u.Text + " " + s.Text)
+			u.EndT = s.EndT
+		} else {
+			out = append(out, Utterance{T: s.T, EndT: s.EndT, Text: s.Text})
+		}
+		lastEffectiveEnd = effEnd
+	}
+	return out
+}
