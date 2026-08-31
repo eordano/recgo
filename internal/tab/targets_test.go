@@ -1,8 +1,12 @@
 package tab
 
 import (
+	"io"
+	"net"
+	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestIsRecordableFiltersNonAppTargets(t *testing.T) {
@@ -47,6 +51,15 @@ func TestTabInfoShort(t *testing.T) {
 		t.Errorf("Short(10) = %q (%d runes)", got, len([]rune(got)))
 	}
 
+	ti = TabInfo{Title: strings.Repeat("é", 100)}
+	got = ti.Short(10)
+	if !utf8.ValidString(got) {
+		t.Errorf("Short on a multibyte title produced invalid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("Short on a multibyte title did not truncate: %q", got)
+	}
+
 	tiny := TabInfo{Title: "abc"}
 	if got := tiny.Short(0); got != "abc" {
 		t.Errorf("Short(0) = %q", got)
@@ -72,4 +85,55 @@ func TestTabWatcherStopIsIdempotent(t *testing.T) {
 
 func TestTabWatcherStopBeforeWatchIsSafe(t *testing.T) {
 	NewTabWatcher(1).Stop()
+}
+
+// fakeCDPListing serves a /json/list on a loopback port, the way Chrome's
+// remote-debugging endpoint does, and returns that port.
+func fakeCDPListing(t *testing.T, body string) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/json/list", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, body)
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func TestMatchTabPicksTheRequestedTab(t *testing.T) {
+	port := fakeCDPListing(t, `[
+	  {"id":"A","type":"page","url":"http://localhost:5173/dashboard","title":"Dashboard","webSocketDebuggerUrl":"ws://x/A"},
+	  {"id":"B","type":"page","url":"https://docs.example/guide","title":"Guide","webSocketDebuggerUrl":"ws://x/B"},
+	  {"id":"C","type":"page","url":"chrome://settings","title":"Settings","webSocketDebuggerUrl":"ws://x/C"}
+	]`)
+
+	for _, c := range []struct{ match, want string }{
+		{"", "A"},
+		{"docs.example", "B"},
+		{"Guide", "B"},
+		{"dashboard", "A"},
+	} {
+		got, err := MatchTab(port, c.match)
+		if err != nil {
+			t.Fatalf("MatchTab(%q): %v", c.match, err)
+		}
+		if got.ID != c.want {
+			t.Errorf("MatchTab(%q) = %q, want %q", c.match, got.ID, c.want)
+		}
+	}
+
+	// A chrome:// page is not recordable, so matching it must fail rather
+	// than pin the recording to a tab that can never produce events.
+	if _, err := MatchTab(port, "settings"); err == nil {
+		t.Error("MatchTab matched a chrome:// target")
+	}
+	if _, err := MatchTab(port, "nothing-here"); err == nil {
+		t.Error("MatchTab silently accepted a match nothing satisfies")
+	}
 }

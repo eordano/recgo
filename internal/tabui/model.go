@@ -36,7 +36,18 @@ type Model struct {
 	started       time.Time
 	quitting      bool
 	marks         int
+	narration     []string
 }
+
+// Narration is sent by the caller when a live transcription pass decodes
+// text; the follow view shows the last few lines so the operator can see
+// that speech is being picked up.
+type Narration struct {
+	T    float64
+	Text string
+}
+
+const narrationKeep = 5
 
 type tabsMsg struct {
 	tabs []tab.TabInfo
@@ -88,6 +99,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case updateMsg:
 		return m, m.refresh()
 
+	case Narration:
+		line := strings.TrimSpace(msg.Text)
+		if line != "" {
+			m.narration = append(m.narration, fmt.Sprintf("%s  %s", tab.FormatClock(msg.T), line))
+			if len(m.narration) > narrationKeep {
+				m.narration = m.narration[len(m.narration)-narrationKeep:]
+			}
+		}
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
@@ -119,7 +139,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "m":
-			if m.Mode == ModeFollow && m.rec != nil {
+			// Through the follower when there is one, so the mark is
+			// attributed to the tab that was in front when it was pressed.
+			if m.Mode == ModeFollow && m.follower != nil {
+				m.follower.Mark("")
+				m.marks++
+			} else if m.Mode == ModeFollow && m.rec != nil {
 				m.rec.Push(tab.Event{T: m.rec.Clock.Now(), Kind: "mark"})
 				m.marks++
 			}
@@ -180,6 +205,12 @@ func (m *Model) View() string {
 
 	if m.Mode == ModeFollow && m.rec != nil {
 		b.WriteString(panel.Width(w - 2).Render(m.stats()))
+		b.WriteString("\n")
+	}
+
+	if len(m.narration) > 0 {
+		b.WriteString(panel.Width(w - 2).Render(
+			titleSt.Render("narration") + "\n" + strings.Join(m.narration, "\n")))
 		b.WriteString("\n")
 	}
 

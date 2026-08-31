@@ -119,6 +119,19 @@ func (s *Recording) NextClickSeq() int {
 	return s.clickSeq
 }
 
+func (s *Recording) EventsSince(n int) ([]Event, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n > len(s.events) {
+		n = len(s.events)
+	}
+	out := make([]Event, 0, len(s.events)-n)
+	for _, e := range s.events[n:] {
+		out = append(out, *e)
+	}
+	return out, len(s.events)
+}
+
 func (s *Recording) Snapshot() []Event {
 	s.mu.Lock()
 	out := make([]Event, 0, len(s.events))

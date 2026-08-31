@@ -1,10 +1,12 @@
 package tab
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type TabInfo struct {
@@ -22,7 +24,11 @@ func (t TabInfo) Short(width int) string {
 		label = strings.TrimPrefix(strings.TrimPrefix(t.URL, "https://"), "http://")
 	}
 	if width > 3 && len(label) > width {
-		label = label[:width-1] + "…"
+		cut := width - 1
+		for cut > 0 && !utf8.RuneStart(label[cut]) {
+			cut--
+		}
+		label = label[:cut] + "…"
 	}
 	return label
 }
@@ -153,4 +159,26 @@ func (w *TabWatcher) Stop() {
 	}
 	w.stopped = true
 	close(w.stop)
+}
+
+// MatchTab picks the recordable tab whose URL or title contains match, using
+// the same substring rule Attach does so --match means one thing across the
+// CLIs. An empty match takes the first recordable tab.
+func MatchTab(port int, match string) (TabInfo, error) {
+	tabs, err := ListRecordableTabs(port)
+	if err != nil {
+		return TabInfo{}, err
+	}
+	if len(tabs) == 0 {
+		return TabInfo{}, fmt.Errorf(
+			"no recordable tabs on port %d — is the browser running with --remote-debugging-port=%d?",
+			port, port)
+	}
+	for _, t := range tabs {
+		if match == "" || strings.Contains(t.URL, match) || strings.Contains(t.Title, match) {
+			return t, nil
+		}
+	}
+	return TabInfo{}, fmt.Errorf("no tab matching %q among the %d recordable tab(s) on port %d",
+		match, len(tabs), port)
 }

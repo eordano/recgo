@@ -19,6 +19,8 @@ import (
 	"github.com/eordano/recgo/internal/config"
 	"github.com/eordano/recgo/internal/tab"
 	"github.com/eordano/recgo/internal/tabui"
+	"github.com/eordano/recgo/internal/transcribe"
+	"github.com/eordano/recgo/internal/upload"
 )
 
 func pickTab(port int) (*tab.TabInfo, error) {
@@ -52,6 +54,7 @@ type options struct {
 	keepRaw     bool
 	pick        bool
 	json        bool
+	live        bool
 
 	titleBackend string
 	titleURL     string
@@ -64,6 +67,13 @@ type options struct {
 	cfgURL   string
 	cfgModel string
 	cfgKey   string
+
+	syncTarget string
+	syncKey    string
+	noSync     bool
+
+	portal     string
+	portalRoom string
 }
 
 func (o options) sttEndpoints() []tab.Endpoint {
@@ -101,10 +111,31 @@ func main() {
 	flag.BoolVar(&o.keepRaw, "keep-raw", false, "keep audio.pcm alongside audio.wav")
 	flag.BoolVar(&o.pick, "select", false, "pick a tab from a list of what the browser has open")
 	flag.BoolVar(&o.json, "json", false, "also write session.json (full machine-readable timeline)")
+	flag.BoolVar(&o.live, "live", true,
+		"build the session document as it is recorded: print each line as it happens and keep "+
+			"SESSION.live.md current in the session folder; narration is transcribed while you "+
+			"speak (locally with --stt-backend local); with --stt-backend remote this also "+
+			"STREAMS NARRATION AUDIO to the STT endpoint while recording (--live=false to disable)")
 	flag.StringVar(&o.titleBackend, "title-backend", "",
 		"name the session with an LLM: remote (UPLOADS THE TRANSCRIPT) | none (default: follow --stt-backend)")
 	flag.StringVar(&o.titleURL, "title-url", "", "override the OpenAI-compatible endpoint list used for the title")
 	flag.StringVar(&o.titleModel, "title-model", "", "override the chat model (default: whatever the endpoint serves)")
+	flag.StringVar(&o.portal, "portal", "",
+		"portal server URL (wss://host or https://host): dial out and serve read-only file "+
+			"tools over the output root while recording, so an agent in that portal room can "+
+			"follow the live session. EXPOSES THE OUTPUT ROOT (all sessions, read-only) to "+
+			"everyone in the room for as long as the recording runs; requires --portal-room")
+	flag.StringVar(&o.portalRoom, "portal-room", "",
+		"portal room to join; the room name is the only credential, so pick an unguessable one")
+	flag.StringVar(&o.syncTarget, "sync-target", "",
+		"rsync destination (host:/path) for the finished session; defaults to the [upload] "+
+			"target in the config file, and is empty unless an operator set one. PUSHES THE "+
+			"WHOLE SESSION (transcript, events, screenshots) to that host as soon as the "+
+			"recording is written, instead of waiting for whatever periodic sync the machine "+
+			"runs; --no-sync keeps it local")
+	flag.StringVar(&o.syncKey, "sync-key", "", "ssh identity for --sync-target")
+	flag.BoolVar(&o.noSync, "no-sync", false,
+		"keep the finished session on this machine even when a sync target is configured")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "recgo-tab — record a browser tab with narration\n\n")
@@ -130,27 +161,23 @@ func main() {
 		}
 	})
 	if !chromiumSet {
-		o.chromium = defaultChromium()
+		o.chromium = tab.DefaultChromium()
 	}
 
 	if cfg, err := config.Load(); err == nil {
 		o.cfgURL = cfg.Transcription.Remote.Endpoint
 		o.cfgModel = cfg.Transcription.Remote.Model
 		o.cfgKey = cfg.Transcription.Remote.APIKey
+		if o.syncTarget == "" && cfg.Upload.Enabled {
+			o.syncTarget = cfg.Upload.Target
+			o.syncKey = cfg.Upload.SSHKey
+		}
 	}
 
 	if err := run(o); err != nil {
 		fmt.Fprintf(os.Stderr, "recgo-tab: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-func documentsDir() string {
-	if d := os.Getenv("XDG_DOCUMENTS_DIR"); d != "" {
-		return d
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Documents")
 }
 
 func run(o options) error {
@@ -170,12 +197,24 @@ func run(o options) error {
 	started := time.Now()
 	root := o.out
 	if root == "" {
-		root = defaultOutRoot()
+		root = tab.DefaultOutRoot()
 	}
 	stamp := started.Format("2006-01-02-15-04")
 	provisional := filepath.Join(root, fmt.Sprintf("%s-recording-%d", stamp, os.Getpid()))
 	if err := os.MkdirAll(provisional, 0o700); err != nil {
 		return err
+	}
+
+	if o.portal != "" {
+		if o.portalRoom == "" {
+			return fmt.Errorf("--portal requires --portal-room (the room name is the credential)")
+		}
+		bridge, err := tab.StartPortalBridge(o.portal, o.portalRoom, root,
+			func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) })
+		if err != nil {
+			return err
+		}
+		defer bridge.Close()
 	}
 
 	var browser *exec.Cmd
@@ -186,13 +225,7 @@ func run(o options) error {
 		if err != nil {
 			return err
 		}
-		defer func() {
-			if browser != nil && browser.Process != nil {
-				browser.Process.Signal(syscall.SIGTERM)
-				browser.Wait()
-			}
-			os.RemoveAll(profile)
-		}()
+		defer func() { tab.StopChromium(browser, profile) }()
 	}
 
 	if o.pick && o.launch == "" {
@@ -216,6 +249,35 @@ func run(o options) error {
 	clock := tab.NewClock()
 	rec := tab.NewRecorder(cdp, clock, provisional)
 
+	var feed *transcribe.Session
+	var tapFn func([]byte)
+	if o.live && !o.noAudio {
+		switch o.sttBackend {
+		case "remote":
+			if eps := o.sttEndpoints(); len(eps) > 0 {
+				key := firstNonEmpty(o.sttKey, os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY"), o.cfgKey)
+				feed = tab.RemoteLiveFeed(context.Background(), eps[0], key, o.sttModel)
+				fmt.Fprintf(os.Stderr, "live: streaming narration to %s as it is spoken -- the final "+
+					"transcript is still redone from the full recording (--live=false to disable)\n", eps[0].URL)
+			} else {
+				fmt.Fprintln(os.Stderr, "live: narration disabled -- no remote STT endpoint configured "+
+					"(set --stt-url, or [transcription.remote] endpoint in the recgo config)")
+			}
+		case "local":
+			var reason string
+			feed, reason = tab.LocalLiveFeed(context.Background(), o.whisperBin, o.whisperModel, o.whisperVADModel)
+			if feed != nil {
+				fmt.Fprintf(os.Stderr, "live: transcribing narration locally as it is spoken -- the final "+
+					"transcript is still redone from the full recording (--live=false to disable)\n")
+			} else {
+				fmt.Fprintf(os.Stderr, "live: narration disabled -- %s\n", reason)
+			}
+		}
+		if feed != nil {
+			tapFn = feed.Feed
+		}
+	}
+
 	var mic *tab.Mic
 	if !o.noAudio {
 		mic, err = tab.StartMic(tab.MicOptions{
@@ -223,10 +285,12 @@ func run(o options) error {
 			OutDir:    provisional,
 			Device:    o.micDevice,
 			FFmpegBin: o.ffmpegBin,
+			Tap:       tapFn,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "audio: %v\n", err)
 			mic = nil
+			feed = nil
 		}
 	}
 
@@ -254,11 +318,35 @@ func run(o options) error {
 		}
 	}
 
+	var lv *tab.LiveView
+	if o.live {
+		header := fmt.Sprintf("# Session (recording — replaced by SESSION.md at stop)\n\n"+
+			"Start: %s\nPage: %s\n\n", started.Format("2006-01-02 15:04:05"),
+			firstNonEmpty(o.launch, target.URL))
+		lv = tab.StartLiveView(rec.Recording(), os.Stderr, header)
+		if feed != nil {
+			if err := feed.StartFeed(); err != nil {
+				fmt.Fprintf(os.Stderr, "live narration: %v\n", err)
+				feed = nil
+			} else {
+				tab.ConsumeLive(feed, clock, lv.Utterance, func(err error) {
+					fmt.Fprintf(os.Stderr, "live narration: %v\n", err)
+				})
+			}
+		}
+	}
+
 	go readMarks(rec)
 	waitForStop(o.duration)
 
-	fmt.Fprintln(os.Stderr, "stopping…")
+	fmt.Fprintln(os.Stderr, "stopping...")
 	events := rec.Stop()
+	if feed != nil {
+		feed.Stop()
+	}
+	if lv != nil {
+		lv.Stop()
+	}
 	durationMs := clock.Now()
 
 	audioNote := ""
@@ -276,11 +364,17 @@ func run(o options) error {
 		}
 	}
 
-	transcript := transcribe(o, clock, wavPath)
+	if wavPath != "" && o.sttBackend != "none" {
+		fmt.Fprintln(os.Stderr, "transcribing audio...")
+	}
+	transcript := transcribeWav(o, clock, wavPath)
 	if transcript != nil && !transcript.OK {
 		fmt.Fprintf(os.Stderr, "transcription: %s\n", transcript.Reason)
 	}
 
+	if o.titleBackend == "remote" || (o.titleBackend == "" && o.sttBackend == "remote") {
+		fmt.Fprintln(os.Stderr, "naming the session...")
+	}
 	named := titleFor(o, transcript, events)
 	if named.Note != "" {
 		fmt.Fprintf(os.Stderr, "title: %s\n", named.Note)
@@ -304,6 +398,7 @@ func run(o options) error {
 		Tool:        "recgo-tab",
 		AudioNote:   audioNote,
 		TitleNote:   named.Note,
+		System:      tab.CollectSystemInfo(),
 	}, tab.PackOptions{JSON: o.json})
 	if err != nil {
 		return err
@@ -312,7 +407,33 @@ func run(o options) error {
 	fmt.Fprintf(os.Stderr, "\nwrote %s/SESSION.md\n", finalDir)
 	fmt.Fprintf(os.Stderr, "  %d clicks, %d HMR, %d errors, %d utterances\n",
 		session.Counts.Clicks, session.Counts.HMR, session.Counts.Errors, session.Counts.Utterances)
+	syncSession(o, finalDir)
 	return nil
+}
+
+// The host may also run a periodic sync over the output root, but "it will be
+// there within five minutes" is not something the person who just recorded can
+// act on: they want to hand the remote path to someone, or to an agent, now.
+// So the session is pushed here and the destination is printed next to the
+// local one. A failure is reported and swallowed -- the recording is already
+// safely on disk, and the periodic sync is still a backstop, so this is not
+// worth failing the whole run over.
+func syncSession(o options, dir string) {
+	if o.noSync || o.syncTarget == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "  syncing -> %s ...\n", o.syncTarget)
+	dest, err := upload.SyncDir(config.UploadConfig{
+		Target: o.syncTarget,
+		SSHKey: o.syncKey,
+	}, dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  sync failed (kept locally): %v\n", err)
+		return
+	}
+	if dest != "" {
+		fmt.Fprintf(os.Stderr, "  synced -> %s\n", upload.Display(dest))
+	}
 }
 
 func titleFor(o options, transcript *tab.Transcript, events []tab.Event) tab.TitleResult {
@@ -336,7 +457,7 @@ func titleFor(o options, transcript *tab.Transcript, events []tab.Event) tab.Tit
 	}, transcript, events)
 }
 
-func transcribe(o options, clock *tab.Clock, wavPath string) *tab.Transcript {
+func transcribeWav(o options, clock *tab.Clock, wavPath string) *tab.Transcript {
 	switch o.sttBackend {
 	case "none":
 		return &tab.Transcript{Reason: "transcription disabled (--stt-backend none)"}
@@ -350,16 +471,7 @@ func transcribe(o options, clock *tab.Clock, wavPath string) *tab.Transcript {
 	}
 
 	if o.sttBackend == "local" {
-		model, vad := o.whisperModel, o.whisperVADModel
-		if model == "" || vad == "" {
-			dm, dv := tab.DiscoverWhisperModel()
-			if model == "" {
-				model = dm
-			}
-			if vad == "" {
-				vad = dv
-			}
-		}
+		model, vad := tab.ResolveWhisperModel(o.whisperModel, o.whisperVADModel)
 		t := tab.TranscribeLocal(clock, wavPath, o.whisperBin, model, vad)
 		if t.OK && vad == "" {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", t.AccuracyNote)
@@ -417,50 +529,10 @@ func waitForStop(d time.Duration) {
 }
 
 func launchChromium(o options) (*exec.Cmd, string, error) {
-	profile := filepath.Join(os.TempDir(), fmt.Sprintf("recgo-tab-profile-%d", os.Getpid()))
-	args := []string{
-		fmt.Sprintf("--remote-debugging-port=%d", o.port),
-		"--user-data-dir=" + profile,
-		"--no-first-run",
-		"--no-default-browser-check",
-		"--window-size=1280,800",
-	}
-	if o.headless {
-		args = append(args, "--headless=new", "--disable-gpu", "--no-sandbox")
-	}
-	args = append(args, "about:blank")
-
-	cmd := exec.Command(o.chromium, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return nil, profile, fmt.Errorf("launch chromium: %w", err)
-	}
-
-	for i := 0; i < 100; i++ {
-		if targets, err := tab.ListTargets(o.port); err == nil {
-			for _, t := range targets {
-				if t.Type == "page" {
-					return cmd, profile, nil
-				}
-			}
-		}
-		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-			return nil, profile, fmt.Errorf("chromium exited: %s", tailString(stderr.String(), 800))
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	cmd.Process.Kill()
-	return nil, profile, fmt.Errorf("chromium exposed no page target on port %d: %s",
-		o.port, tailString(stderr.String(), 800))
-}
-
-func tailString(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[len(s)-n:]
+	return tab.LaunchChromium(tab.LaunchOptions{
+		Chromium: o.chromium, Port: o.port, Headless: o.headless,
+		Profile: filepath.Join(os.TempDir(), fmt.Sprintf("recgo-tab-profile-%d", os.Getpid())),
+	})
 }
 
 func firstNonEmpty(vals ...string) string {

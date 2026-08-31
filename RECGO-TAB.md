@@ -61,6 +61,36 @@ The session name comes from an LLM reading the narration
 (`--title-backend remote`, which uploads the transcript). Without it the name is
 derived from the most-clicked element, as before.
 
+## Watching it build
+
+The document is not only written at stop — it is assembled while you record, so
+you can see the shape of what the LLM will get *before* pressing Ctrl-C:
+
+- **Every line prints to stderr as it happens**, in the exact shape it will have
+  in SESSION.md: clicks (once their three shots have settled, so the image name
+  and the `screen did not repaint` evidence are already on the line), errors,
+  console output, navigations, HMR — and narration.
+- **`SESSION.live.md` in the session folder is rewritten every ~1s** with the
+  full current document, properly interleaved and time-sorted. `tail -f` it in
+  another pane, or point an agent at it mid-session. It is replaced by the real
+  `SESSION.md` at stop.
+
+Narration appears live under both STT backends: the microphone PCM is teed
+into the same rolling-window transcription loop recgo's TUI uses
+(`internal/transcribe`), a whisper pass every ~3s, each pass primed with the
+locked text before it. With `--stt-backend local` the pass runs `whisper-cli`
+on this machine and nothing is uploaded; with `--stt-backend remote` the pass
+hits the configured endpoint, which means audio streams to the endpoint
+*while* you record instead of only at stop -- same destination, announced on
+stderr at start. Live narration lines are a *preview* -- stamped with the
+session time of the audio window they came from, accurate to a few seconds.
+The final document still re-transcribes the complete `audio.wav` in one shot
+with word timings and VAD correction; nothing from the preview leaks into it.
+`--live=false` turns all of it off. `recgo-browser` and `recgo-desktop` show
+the same live decode -- in the follow TUI's narration panel and in the same
+stderr stream + `SESSION.live.md` recgo-tab writes, respectively -- so the
+terminal confirms that speech is actually being decoded while you record.
+
 ## What it captures
 
 - **Clicks with element identity** — `[data-testid="save"] — "Save"`, not
@@ -70,8 +100,14 @@ derived from the most-clicked element, as before.
   `InputCapture` portal is exclusive-mode, and would take input *away* from the
   app under test).
 - **Screenshots at −100ms / at / +100ms** around every click.
-- **HMR traffic** — Vite and webpack-dev-server, classified by payload shape, with
-  every raw frame archived.
+- **HMR traffic** — Vite, webpack-dev-server and Phoenix live-reload, classified
+  by payload shape, with every raw frame archived. Phoenix channel frames are
+  arrays (`[joinRef, ref, topic, event, payload]`); only the
+  `phoenix:live_reload` topic counts as dev-server traffic — `assets_change`
+  pushes, and error replies such as *"live reload backend not running"* (a
+  Phoenix app without the live-reload backend would otherwise read as a
+  suspicious `0 HMR`). LiveView diffs and heartbeats are the application itself
+  and stay unclassified, though the raw frames are all in `logs/`.
 - **Console, uncaught exceptions, and failed requests**, attributed to the click
   that caused them.
 - **Narration**, transcribed and aligned to the clicks.
@@ -141,8 +177,49 @@ a Goertzel filter, making ffmpeg's capture latency a measurement.
 This needs the tone to actually reach the capture device: speakers into a
 microphone, or `--mic` pointed at a `.monitor` source. On headphones the tone is
 never heard, and the anchor falls back to the first-byte estimate — reported
-plainly on `SESSION.md`'s closing line (and in `session.json` under `--json`)
-rather than papered over.
+plainly in `SESSION.md`'s "How this was captured" block (and in `session.json`
+under `--json`) rather than papered over.
+
+The onset search is confined to the first 15s of the capture. The tone plays
+within the first seconds, so a 1kHz match beyond that window is not the tone —
+it is speech. Before this guard, a loud 1kHz-heavy moment two minutes into a
+headphone session was "found" as the tone, shifting the anchor by minutes and
+pinning every narration line to a negative timestamp (rendered `00.00.00`).
+
+Two more guards close the other observed failure mode. The page can report a
+stale tone timestamp: `AudioContext.getOutputTimestamp()` returns zeros on a
+context that has not rendered audio yet, which stamps the tone "at page load"
+-- minutes early when recording a long-open tab. The injected script now
+ignores the output timestamp until it has actually advanced, and on the Go
+side `toneAnchor` rejects any correction implying more than 15s of capture
+latency (or a negative one beyond clock error), keeping the first-byte
+estimate and saying so in the anchor note.
+
+## Serving the session to an agent elsewhere: --portal
+
+```sh
+recgo-tab --launch http://localhost:5173 \
+  --portal wss://portal.example --portal-room "$(openssl rand -hex 8)"
+```
+
+The recorder itself dials out to a [portal](../portal/) server's console-bridge
+lane and serves three read-only tools over the output root — `list_dir`,
+`read_file`, `read_bytes` (base64 with a 4MB cap, so screenshots survive) —
+for exactly as long as the recording runs. An agent anywhere portal is
+reachable (portal's own chat, or Claude Code through `portal-mcp`) reads
+`SESSION.live.md` and the screenshots live, with no inbound port on this
+machine, no rsync, and no copies.
+
+This is deliberate egress and is treated exactly like the remote STT backend:
+off by default, the destination and what is exposed announced on stderr
+before the connection opens, and pinned by `noupstream_test.go`. The exposure
+is bounded three ways: the tool set is read-only by construction (the hello
+declares `write:false` and the server filters advertisements against the same
+rule), every path is confined to the output root with symlinks resolved, and
+`read_bytes` refuses oversize files rather than truncating them. The portal
+room name is the only credential — `--portal-room` is mandatory and the help
+text says to pick an unguessable one. Reconnection is automatic with backoff;
+the bridge dies with the recording.
 
 ## recgo-tab does not upstream recordings
 
@@ -168,17 +245,37 @@ meeting recording. So:
 `noupstream_test.go` makes these properties of the build rather than promises in
 a comment — it fails if the uploader is imported, if a `net/http` client appears
 outside the opt-in remote backends (`stt.go`, `title.go`, `cdp.go`), if the
-default backend stops being `auto`, if `--title-backend` stops following
-`--stt-backend`, or if the output path moves into the archive tree. The failure mode being guarded
+live-narration streaming (`internal/transcribe`) is wired anywhere but a
+CLI's `main.go` (recgo-tab, recgo-browser, recgo-desktop), if the default
+backend stops being `auto`, if
+`--title-backend` stops following `--stt-backend`, if the help text stops
+warning that `--live` streams narration under a remote backend or that
+`--portal` exposes the output root, if the websocket client is imported
+anywhere but `cdp.go` and `portal.go`, or if the
+output path moves into the archive tree. Every one of those runs against
+`recgo-tab`, `recgo-browser` **and** `recgo-desktop`: they are the same tool
+at three settings, so a promise that holds for one and not the others is the
+worst possible outcome. The failure mode being guarded
 against is silent: nobody notices data leaving.
 
-> **recgo-desktop differs.** Everything above is scoped to `recgo-tab`, and so is
-> `noupstream_test.go` — every path it checks is `cmd/recgo-tab`. `recgo-desktop`
-> defaults to `--stt-backend remote`, so its audio track is uploaded to the
-> configured endpoint unless you pass `--stt-backend local` (or `none`). Video
-> and screenshots still never leave the machine. Pointing the config at your
-> own litellm/speaches rather than a third party is what makes that default
-> defensible; `local` remains available and works offline.
+> **recgo-desktop is the same recorder pointed at the screen.** Same
+> `--stt-backend auto` local-first default, same live document, same
+> `--portal` / `--sync-target`, same output root, and a dedicated test pins
+> its extra promise: video and screenshots never leave the machine. What
+> differs is the capture surface. Clicks come from a listen-only OS event tap
+> (position only -- outside a browser nothing names the control under the
+> cursor), which on macOS needs the Accessibility (or Input Monitoring) grant
+> and on Linux is not available yet (`--click-shots=false` to turn it off).
+> Focus changes -- another window or app coming to the front, or the front
+> window's title changing, which is what a browser tab switch looks like from
+> outside -- and newly appearing windows and dialogs are screenshotted too,
+> via the window list the Screen Recording grant already exposes
+> (`--focus-shots=false` to turn it off; Linux not yet). Marks are typed as
+> `m<enter>`; and there is no calibration tone, since there is no page to
+> emit it through. Each session also records the machine
+> it was captured on -- host, user, OS, hardware model, display layout -- in
+> `SESSION.md` and `session.json`, so a screenshot's pixel scale is never a
+> guess.
 
 ### Local models
 
@@ -243,24 +340,41 @@ Note gorilla permits one concurrent reader and one concurrent writer; `CDP`
 serialises writes behind a mutex because `SendAsync` (screencastFrameAck) fires
 from the read loop while callers may be sending commands.
 
-## recgo-browser — following you across tabs
+## recgo-browser — the default, following you across tabs
 
 `recgo-tab` pins one page for the whole recording. Right for reproducing a bug on
 one screen; wrong the moment the work spans a dashboard, a docs page and the app,
-because the interesting clicks land in tabs nobody is watching.
+because the interesting clicks land in tabs nobody is watching. Reviewing a
+product is the second case, so **`recgo-browser` is the one to reach for**:
 
 ```sh
-recgo-browser --port 9222          # attach to every tab, follow along
-recgo-tab --select                 # or: pick one tab from a list
+recgo-browser                                  # follow the whole browser
+recgo-browser --launch http://localhost:5173   # ...or start one and follow it
+recgo-browser --match localhost:5173           # pin to one tab (recgo-tab's shape)
+recgo-browser --select                         # ...or pick that tab from a list
 ```
 
-Both need a browser started with `--remote-debugging-port=<port>`.
+Without `--launch` the browser must already be running with
+`--remote-debugging-port=<port>`.
 
 `recgo-browser` attaches a recorder to every open tab, merges everything onto one
 clock, and marks in the timeline which tab was in front. Tabs opened mid-session
 are picked up within a second; tabs that close are detached and noted. New event
 kinds: `tab-attach`, `tab-close`, `tab-switch`, and every event carries a
 `targetId`.
+
+**It carries recgo-tab's whole flag set**, and a NixOS subtest fails the build if
+that stops being true: same `--stt-backend auto` local-first transcription, same
+`--title-backend` following it, same `--portal` live bridge, same `--sync-target`
+push, same `SESSION.live.md`, same calibration-tone anchor (emitted through the
+tab in front), same `--keep-raw` / `--json` / `--duration` / `--headless`.
+`recgo-tab` remains as the single-tab recorder; `recgo-browser --match` is the
+same thing, so there is one binary to remember.
+
+`--match` and `--select` do more than filter: they turn the tab watcher off, so a
+popup opened by a click is deliberately *not* followed. That is what makes a
+pinned recording a faithful stand-in for `recgo-tab`. With `--launch` there is
+only ever the one launched tab, so either flag pins to it whatever its value.
 
 **How it knows where you are.** CDP's `/json/list` says nothing about focus, so
 the question is answered from inside the page: only the foreground tab of a
@@ -276,8 +390,40 @@ than silently absent — verified in `follow_test.go`, which sees 10 images acro
 12 shot slots with two tabs open.
 
 The TUI (`internal/tabui`) shows the attached tabs with a filled dot on the one
-in front, live click/HMR/error counts, and `m` to mark a moment. `--plain` skips
-it for scripted runs.
+in front, live click/HMR/error counts, and `m` to mark a moment --- the mark is
+attributed to the tab that was in front when the key was pressed. A narration
+panel shows the last few lines as they are decoded. `--plain` skips the TUI for
+scripted runs, streams the session document to stderr the way `recgo-tab` does,
+and takes `mark` on stdin instead of the keypress.
+
+`SESSION.live.md` is written under both front ends. Only `--plain` also streams
+it to stderr, because under the TUI bubbletea owns the terminal --- so pointing
+an agent (or a `tail`) at the live document works no matter which one is up.
+
+## recgo-sessions — browse what was recorded
+
+A session folder is written for an LLM; `recgo-sessions` renders it for a
+person. It scans the output root, parses every `SESSION.md`, and writes a
+single self-contained `index.html` next to the session folders — no server, no
+uploads, all references relative:
+
+```sh
+recgo-sessions                 # $XDG_DOCUMENTS_DIR/walk-and-talk → index.html
+recgo-sessions --dir /path     # any sessions root
+```
+
+The viewer shows, per session: the screenshot at each click with a marker on
+the clicked element (viewport coordinates scaled against the `-full.png`
+capture, device-pixel-ratio detected per session so 1x Linux displays and
+Retina Macs both land exactly), the −100ms / +100ms siblings behind a
+segmented control, a filmstrip, and a timeline interleaving narration with
+clicks — element text, selector, and the `no repaint` evidence as badges.
+Playing `audio.wav` steps the frames in sync with the recording clock. Light
+and dark themes follow the system and toggle persistently; the URL hash deep
+links a session, frame, and theme (`#s=1&f=9&theme=dark`).
+
+The page styles follow nur studio's design tokens, and `index.html` is written
+`0600` like everything else in the folder.
 
 ## Screenshots are lossless PNG
 
@@ -394,7 +540,9 @@ trusting the exit code.
 ## Known gaps
 
 - **recgo-tab follows one tab.** New tabs, popups and iframes are not
-  followed; whole-browser capture is what `recgo-browser` is for.
+  followed; whole-browser capture is what `recgo-browser` is for. The same
+  applies to `recgo-browser --match` / `--select`, which is that mode by
+  another name. Iframes are followed by neither.
 - **Pre-attach traffic is lost** when using `--match` against an already-open
   tab. Only `--launch` guarantees a complete record — it lands on `about:blank`,
   instruments, then navigates, because launching straight onto the target URL

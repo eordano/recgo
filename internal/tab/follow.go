@@ -10,6 +10,11 @@ type Follower struct {
 	Port      int
 	Recording *Recording
 
+	// Pin restricts the follower to a single tab: only that target is
+	// attached and no watcher runs, so tabs opened later are ignored. Empty
+	// means follow the whole browser, which is the default.
+	Pin string
+
 	OnUpdate func()
 
 	mu        sync.Mutex
@@ -36,6 +41,19 @@ func (f *Follower) Start() error {
 	if len(tabs) == 0 {
 		return fmt.Errorf("no recordable tabs on port %d — is the browser running with --remote-debugging-port=%d?", f.Port, f.Port)
 	}
+	if f.Pin != "" {
+		pinned := tabs[:0:0]
+		for _, t := range tabs {
+			if t.ID == f.Pin {
+				pinned = append(pinned, t)
+			}
+		}
+		if len(pinned) == 0 {
+			return fmt.Errorf("tab %s is not among the %d recordable tab(s) on port %d",
+				f.Pin, len(tabs), f.Port)
+		}
+		tabs = pinned
+	}
 
 	var attached int
 	var firstErr error
@@ -50,6 +68,10 @@ func (f *Follower) Start() error {
 	}
 	if attached == 0 {
 		return fmt.Errorf("could not attach to any of %d tab(s): %w", len(tabs), firstErr)
+	}
+
+	if f.Pin != "" {
+		return nil
 	}
 
 	f.watcher = NewTabWatcher(f.Port)
@@ -167,6 +189,40 @@ func (f *Follower) Tabs() []TabInfo {
 
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// ActiveCDP returns the connection to the tab the user is looking at, or any
+// attached tab when none has reported itself visible yet. The calibration
+// tone needs a page to play it, and the foreground tab is the one whose
+// speakers are audible.
+func (f *Follower) ActiveCDP() *CDP {
+	active := f.Recording.ActiveTarget()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if rec, ok := f.recorders[active]; ok {
+		return rec.cdp
+	}
+	ids := make([]string, 0, len(f.recorders))
+	for id := range f.recorders {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		return f.recorders[id].cdp
+	}
+	return nil
+}
+
+// Mark stamps the timeline, attributed to the tab in front so the mark reads
+// against whatever the user was looking at when they pressed the key.
+func (f *Follower) Mark(note string) float64 {
+	t := f.Recording.Clock.Now()
+	f.Recording.Push(Event{
+		T: t, Kind: "mark", Note: note, TargetID: f.Recording.ActiveTarget(),
+	})
+	f.notify()
+	return t
 }
 
 func (f *Follower) Count() int {

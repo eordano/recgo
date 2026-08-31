@@ -148,7 +148,7 @@ let
               )
               machine.succeed(
                   "su - alice -c 'XDG_RUNTIME_DIR=/run/user/1000 "
-                  + "timeout 40 ${recgo}/bin/recgo-tab --out ~/rec --no-audio "
+                  + "timeout 40 ${recgo}/bin/recgo-browser --out ~/rec --no-audio "
                   + "--stt-backend none --duration 3s --headless "
                   + "--launch about:blank' >&2 || true"
               )
@@ -158,20 +158,54 @@ let
               assert bad == "", f"world/group readable files in the session:\n{bad}"
         ''}
 
-        with subtest("both binaries run"):
+        with subtest("all three binaries run"):
             # Redirect to a file rather than piping into grep: grep -q exits as
             # soon as it matches, which closes the pipe and kills the writer with
             # SIGPIPE (exit 141) before it has finished printing help.
             machine.succeed("${recgo}/bin/recgo-tab -h > /tmp/tab-help 2>&1 || true")
             machine.succeed("${recgo}/bin/recgo-browser -h > /tmp/browser-help 2>&1 || true")
+            machine.succeed("${recgo}/bin/recgo-desktop -h > /tmp/desktop-help 2>&1 || true")
             tab_help = machine.succeed("cat /tmp/tab-help")
             browser_help = machine.succeed("cat /tmp/browser-help")
+            desktop_help = machine.succeed("cat /tmp/desktop-help")
             assert "stt-backend" in tab_help
-            assert "every tab" in browser_help, browser_help
+            assert "Every open tab is recorded" in browser_help, browser_help
+            assert "--match or --select pins the" in browser_help, browser_help
 
-        with subtest("the default backend is local, so nothing is uploaded"):
-            assert 'default "local"' in tab_help, "default backend is not local"
-            assert "Recordings stay on this machine" in tab_help
+        with subtest("the recorders carry the same flags"):
+            # recgo-browser is the default and recgo-tab its pinned-to-one-tab
+            # sibling, so a flag that exists on one has to exist on the other;
+            # otherwise "just use recgo-browser" quietly costs you something.
+            def flags(text):
+                return {
+                    line.strip().split()[0]
+                    for line in text.splitlines()
+                    if line.startswith("  -")
+                }
+
+            only_tab = flags(tab_help) - flags(browser_help)
+            assert not only_tab, f"recgo-tab has flags recgo-browser lacks: {only_tab}"
+
+            pipeline = {
+                "-out", "-duration", "-no-audio", "-mic", "-ffmpeg", "-json",
+                "-live", "-keep-raw", "-stt-backend", "-stt-url", "-stt-model",
+                "-stt-api-key", "-stt-language", "-no-vad-correct",
+                "-whisper-bin", "-whisper-model", "-whisper-vad-model",
+                "-title-backend", "-title-url", "-title-model",
+                "-portal", "-portal-room", "-sync-target", "-sync-key", "-no-sync",
+            }
+            missing = pipeline - flags(desktop_help)
+            assert not missing, f"recgo-desktop lacks session-pipeline flags: {missing}"
+
+        with subtest("transcription is local-first on all three"):
+            for name, text in (
+                ("recgo-tab", tab_help),
+                ("recgo-browser", browser_help),
+                ("recgo-desktop", desktop_help),
+            ):
+                assert 'default "auto"' in text, f"{name} backend is not auto"
+                assert "nothing leaves this machine" in text, name
+                assert "UPLOADS THE AUDIO" in text, name
       '';
     };
 in

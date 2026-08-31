@@ -73,6 +73,55 @@ func destDir(cfg config.UploadConfig, file string) string {
 	return target + "/"
 }
 
+// SyncDir mirrors a whole session directory to cfg.Target. Upload() moves a
+// single recording and rsyncs it flat into the target, which for a recgo-tab
+// session would scatter SESSION.md and its siblings across the target root;
+// this keeps the session as one named directory. It is a no-op with no target
+// configured, so a host that only has an [upload] url (single files over HTTP)
+// stays exactly as it was.
+func SyncDir(cfg config.UploadConfig, dir string) (string, error) {
+	if cfg.Target == "" {
+		return "", nil
+	}
+	st, err := os.Stat(dir)
+	if err != nil || !st.IsDir() {
+		return "", fmt.Errorf("session directory not found: %s", dir)
+	}
+	target := strings.TrimRight(cfg.Target, "/")
+	ssh := sshCommand(cfg.SSHKey)
+
+	if host, remote, ok := strings.Cut(target, ":"); ok {
+		fields := strings.Fields(ssh)
+		args := append(fields[1:], host, "mkdir", "-p", remote)
+		if out, err := exec.Command(fields[0], args...).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("mkdir %s: %v: %s", remote, err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	// No trailing slash on the source: rsync then creates the directory by
+	// name under the target instead of emptying its contents into it.
+	cmd := exec.Command("rsync", "-aH", "--timeout=120", "--chmod=D755,F644",
+		"-e", ssh, strings.TrimRight(dir, "/"), target+"/")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("rsync: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return target + "/" + filepath.Base(dir), nil
+}
+
+// Display drops the ssh login from an rsync destination so it reads as
+// host:/path -- what a human would type, and it keeps a login name out of a
+// line that a recgo-tab session may itself be recording.
+func Display(dest string) string {
+	host, path, ok := strings.Cut(dest, ":")
+	if !ok {
+		return dest
+	}
+	if _, after, found := strings.Cut(host, "@"); found {
+		host = after
+	}
+	return host + ":" + path
+}
+
 func Upload(cfg config.UploadConfig, file string) (string, error) {
 	if !cfg.Enabled {
 		return "", nil

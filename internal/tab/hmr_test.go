@@ -54,6 +54,40 @@ func TestClassifyHMRWebpackAndNonHMR(t *testing.T) {
 	}
 }
 
+func TestClassifyHMRPhoenix(t *testing.T) {
+	h := ClassifyHMR(`["241","242","phoenix:live_reload","assets_change",{"asset_type":"css"}]`)
+	if h == nil || h.Flavor != "phoenix" || h.Type != "assets_change" {
+		t.Fatalf("assets_change: %+v", h)
+	}
+	if !reflect.DeepEqual(h.Files, []string{"css"}) {
+		t.Errorf("files = %v", h.Files)
+	}
+
+	h = ClassifyHMR(`["240","240","phoenix:live_reload","phx_reply",` +
+		`{"status":"error","response":{"message":"live reload backend not running"}}]`)
+	if h == nil || h.Flavor != "phoenix" || h.Type != "error" {
+		t.Fatalf("error reply: %+v", h)
+	}
+	if !reflect.DeepEqual(h.Files, []string{"live reload backend not running"}) {
+		t.Errorf("files = %v", h.Files)
+	}
+}
+
+func TestClassifyHMRPhoenixIgnoresAppTraffic(t *testing.T) {
+	for _, payload := range []string{
+		`[null,"241","phoenix","heartbeat",{}]`,
+		`["240","240","phoenix:live_reload","phx_join",{}]`,
+		`["240","240","phoenix:live_reload","phx_reply",{"status":"ok","response":{}}]`,
+		`["4","8","lv:phx-GMxlQt1_uQMargAJ","event",{"type":"click","event":"save","value":{}}]`,
+		`["4","9","lv:phx-GMxlQt1_uQMargAJ","phx_reply",{"status":"ok","response":{"diff":{}}}]`,
+		`["array"]`,
+	} {
+		if h := ClassifyHMR(payload); h != nil {
+			t.Errorf("ClassifyHMR(%q) = %+v, want nil", payload, h)
+		}
+	}
+}
+
 func TestToUtterancesSplitsOnGap(t *testing.T) {
 	segs := []Segment{
 		{T: 0, EndT: 200, Text: "the"},

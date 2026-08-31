@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func packFixture(t *testing.T, opts PackOptions) string {
@@ -172,8 +173,14 @@ func TestDesktopDocDoesNotTalkAboutPageClicks(t *testing.T) {
 	dir := t.TempDir()
 	events := []Event{
 		{T: 0, Kind: "record-start", FullShot: InitialShot},
-		{T: 2000, Kind: "mark", Seq: 1, FullShot: ShotName(1, "full"),
-			Shots: []Shot{{Label: "at", File: ShotName(1, "at"), FrameT: f(2000)}}},
+		{T: 1000, Kind: "click", Seq: 1, X: 812, Y: 340, FullShot: ShotName(1, "full"),
+			Shots: []Shot{{Label: "at", File: ShotName(1, "at"), FrameT: f(1000)}}},
+		{T: 2000, Kind: "mark", Seq: 2, FullShot: ShotName(2, "full"),
+			Shots: []Shot{{Label: "at", File: ShotName(2, "at"), FrameT: f(2000)}}},
+		{T: 3000, Kind: "focus", Seq: 3, Title: "Ghostty — ~",
+			Shots: []Shot{{Label: "at", File: ShotName(3, "at"), FrameT: f(3000)}}},
+		{T: 4000, Kind: "window-appear", Seq: 4, Title: "Chrome — Save file?",
+			Shots: []Shot{{Label: "at", File: ShotName(4, "at"), FrameT: f(4000)}}},
 	}
 	if _, err := Pack(dir, events, NewClock(), nil,
 		Meta{Slug: "desktop-1-marks", Tool: "recgo-desktop"}, PackOptions{}); err != nil {
@@ -183,8 +190,14 @@ func TestDesktopDocDoesNotTalkAboutPageClicks(t *testing.T) {
 	md, _ := os.ReadFile(filepath.Join(dir, "SESSION.md"))
 	for _, want := range []string{
 		"Initial screenshot: 0001.png",
-		"00.00.02  Mark: 1 → 0002.png",
-		"- Marks are the moments you flagged with `m`.",
+		// A desktop click has a position but no DOM element to name, so the
+		// line must not degrade to "on <unknown>".
+		"00.00.01  Click: 812,340 → 0002.png",
+		"00.00.02  Mark: 2 → 0003.png",
+		"00.00.03  Focus: Ghostty — ~ → 0004.png",
+		"00.00.04  Window: Chrome — Save file? → 0005.png",
+		"Marks are the moments",
+		"Clicks come from a system-wide listener",
 	} {
 		if !strings.Contains(string(md), want) {
 			t.Errorf("SESSION.md missing %q\ngot:\n%s", want, md)
@@ -194,6 +207,20 @@ func TestDesktopDocDoesNotTalkAboutPageClicks(t *testing.T) {
 		if strings.Contains(string(md), unwanted) {
 			t.Errorf("desktop document uses browser wording %q", unwanted)
 		}
+	}
+}
+
+func TestClipCutsOnRuneBoundaries(t *testing.T) {
+	s := "Data " + strings.Repeat("é", 40)
+	got := clip(s, 10)
+	if !utf8.ValidString(got) {
+		t.Errorf("clip produced invalid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("clip %q does not end in ASCII ellipsis", got)
+	}
+	if clip("short", 10) != "short" {
+		t.Error("clip mangled a string under the limit")
 	}
 }
 
@@ -211,5 +238,72 @@ func TestFormatClock(t *testing.T) {
 		if got := FormatClock(c.ms); got != c.want {
 			t.Errorf("FormatClock(%v) = %q, want %q", c.ms, got, c.want)
 		}
+	}
+}
+
+// Whisper hands back breath-sized fragments; the document should read the
+// way the user spoke. Short gaps merge, but a click between two segments
+// keeps them apart — the words before it and after it mean different things.
+func TestNarrationMergesShortGapsButNotAcrossEvents(t *testing.T) {
+	events := []Event{
+		{T: 0, Kind: "record-start"},
+		{T: 5000, Kind: "click", Seq: 1, X: 10, Y: 10},
+	}
+	utt := []Utterance{
+		{T: 1000, EndT: 2000, Text: "Okay, let's review"},
+		{T: 2500, EndT: 3000, Text: "this part of the design"},
+		{T: 6000, EndT: 6500, Text: "and after the click"},
+		{T: 9000, EndT: 9300, Text: "a long pause starts fresh"},
+	}
+
+	merged := mergeUtterances(utt, events)
+	if len(merged) != 3 {
+		t.Fatalf("got %d utterances, want 3: %+v", len(merged), merged)
+	}
+	if merged[0].Text != "Okay, let's review this part of the design" {
+		t.Errorf("short gap did not merge: %q", merged[0].Text)
+	}
+	if merged[0].T != 1000 || merged[0].EndT != 3000 {
+		t.Errorf("merged span %v-%v, want 1000-3000", merged[0].T, merged[0].EndT)
+	}
+	if merged[1].Text != "and after the click" {
+		t.Errorf("merge crossed the click: %q", merged[1].Text)
+	}
+	if merged[2].Text != "a long pause starts fresh" {
+		t.Errorf("merge crossed a %dms pause: %q", 2500, merged[2].Text)
+	}
+}
+
+func TestSessionRecordsSystemInfo(t *testing.T) {
+	dir := t.TempDir()
+	sys := &SystemInfo{
+		Hostname: "devbox", User: "alice", OS: "macOS 15.6 (24G84)", Arch: "arm64",
+		Model: "Mac99,1", Kernel: "Darwin 25.6.0",
+		Displays: []Display{{W: 3456, H: 2234, Scale: 2, Main: true}, {W: 2560, H: 1440}},
+	}
+	if _, err := Pack(dir, []Event{{T: 0, Kind: "record-start"}}, NewClock(), nil,
+		Meta{Slug: "s", Tool: "recgo-desktop", System: sys}, PackOptions{JSON: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	md, _ := os.ReadFile(filepath.Join(dir, "SESSION.md"))
+	for _, want := range []string{
+		"Host: alice@devbox (macOS 15.6 (24G84), arm64, Mac99,1, Darwin 25.6.0)",
+		"Displays: 3456x2234@2x (main), 2560x1440",
+	} {
+		if !strings.Contains(string(md), want) {
+			t.Errorf("SESSION.md missing %q\ngot:\n%s", want, md)
+		}
+	}
+
+	blob, _ := os.ReadFile(filepath.Join(dir, "session.json"))
+	if !strings.Contains(string(blob), `"hostname": "devbox"`) {
+		t.Errorf("session.json does not carry the system info:\n%s", blob)
+	}
+
+	// CollectSystemInfo itself must never fail and always knows the basics.
+	got := CollectSystemInfo()
+	if got.Hostname == "" || got.Arch == "" {
+		t.Errorf("CollectSystemInfo missing basics: %+v", got)
 	}
 }

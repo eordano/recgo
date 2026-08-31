@@ -206,3 +206,54 @@ func TestFollowerMergesClicksFromTwoTabs(t *testing.T) {
 		t.Errorf("calibration error %.1fms is implausibly high", errMs)
 	}
 }
+
+func TestFollowerPinRejectsAnUnknownTab(t *testing.T) {
+	port := fakeCDPListing(t, `[
+	  {"id":"A","type":"page","url":"http://localhost:5173/","title":"App","webSocketDebuggerUrl":"ws://127.0.0.1:1/A"}
+	]`)
+
+	f := NewFollower(port, NewRecording(NewClock(), t.TempDir()))
+	f.Pin = "GONE"
+	err := f.Start()
+	if err == nil {
+		t.Fatal("pinning to a tab that is not open started anyway")
+	}
+	// Naming the pin matters: the alternative is a session that records
+	// nothing and only says so at stop.
+	if !strings.Contains(err.Error(), "GONE") {
+		t.Errorf("error %q does not name the missing tab", err)
+	}
+	if f.Count() != 0 {
+		t.Errorf("attached to %d tab(s) after a failed pin", f.Count())
+	}
+}
+
+func TestFollowerMarkCarriesTheTabInFront(t *testing.T) {
+	rec := NewRecording(NewClock(), t.TempDir())
+	f := NewFollower(9222, rec)
+
+	var updates int
+	f.OnUpdate = func() { updates++ }
+
+	rec.SetActiveTarget("B", "http://b", "B")
+	f.Mark("checkpoint")
+
+	var marks []Event
+	for _, e := range rec.Snapshot() {
+		if e.Kind == "mark" {
+			marks = append(marks, e)
+		}
+	}
+	if len(marks) != 1 {
+		t.Fatalf("recorded %d marks, want 1", len(marks))
+	}
+	if marks[0].TargetID != "B" {
+		t.Errorf("mark attributed to %q, want the tab in front (B)", marks[0].TargetID)
+	}
+	if marks[0].Note != "checkpoint" {
+		t.Errorf("mark note = %q", marks[0].Note)
+	}
+	if updates == 0 {
+		t.Error("marking did not refresh the view")
+	}
+}

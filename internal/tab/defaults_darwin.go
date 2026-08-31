@@ -1,6 +1,6 @@
 //go:build darwin
 
-package main
+package tab
 
 import (
 	"fmt"
@@ -10,9 +10,17 @@ import (
 	"strings"
 )
 
-// defaultChromium resolves the chromium binary used when --chromium is left
+func DocumentsDir() string {
+	if d := os.Getenv("XDG_DOCUMENTS_DIR"); d != "" {
+		return d
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Documents")
+}
+
+// DefaultChromium resolves the chromium binary used when --chromium is left
 // at its default. PATH wins; otherwise the usual app bundles are probed.
-func defaultChromium() string {
+func DefaultChromium() string {
 	if p, err := exec.LookPath("chromium"); err == nil {
 		return p
 	}
@@ -38,11 +46,11 @@ func defaultChromium() string {
 	return "chromium"
 }
 
-// defaultOutRoot picks the output root when --out is not given. If
+// DefaultOutRoot picks the output root when --out is not given. If
 // ~/Documents is iCloud-synced (Desktop & Documents sync), sessions would be
 // uploaded to Apple, so fall back to ~/walk-and-talk instead.
-func defaultOutRoot() string {
-	docs := documentsDir()
+func DefaultOutRoot() string {
+	docs := DocumentsDir()
 	home, _ := os.UserHomeDir()
 	if home != "" && icloudSynced(home, docs) {
 		fmt.Fprintf(os.Stderr,

@@ -2,6 +2,7 @@ package tab
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/eordano/recgo/internal/transcribe"
 )
 
 type Endpoint struct {
@@ -227,6 +230,67 @@ func transcribeOne(clock *Clock, wavPath, baseURL, model string, opts STTOptions
 	}
 	out.Segments = filtered
 	return out
+}
+
+// ResolveWhisperModel merges explicit flag values with discovery: a non-empty
+// override wins per field, the rest comes from DiscoverWhisperModel.
+func ResolveWhisperModel(model, vad string) (string, string) {
+	if model == "" || vad == "" {
+		dm, dv := DiscoverWhisperModel()
+		if model == "" {
+			model = dm
+		}
+		if vad == "" {
+			vad = dv
+		}
+	}
+	return model, vad
+}
+
+// LocalLiveFeed resolves a whisper model and builds a local live-transcription
+// session. When no model is available it returns nil and a human-readable
+// reason so the CLI can say why live narration is off instead of going silent.
+func LocalLiveFeed(ctx context.Context, bin, model, vad string) (*transcribe.Session, string) {
+	model, vad = ResolveWhisperModel(model, vad)
+	if model == "" {
+		return nil, "no local whisper model found " +
+			"(pass --whisper-model, or drop a ggml-*.bin in ~/.local/share/recgo/models)"
+	}
+	return transcribe.NewFeed(ctx, transcribe.Config{
+		LocalBin: bin, LocalModel: model, LocalVADModel: vad,
+	}), ""
+}
+
+// RemoteLiveFeed builds a live-transcription session against an
+// OpenAI-compatible endpoint. This is the one live path that uploads audio
+// while recording; callers announce it on stderr.
+func RemoteLiveFeed(ctx context.Context, ep Endpoint, key, modelOverride string) *transcribe.Session {
+	return transcribe.NewFeed(ctx, transcribe.Config{
+		Endpoint: ep.URL, APIKey: key, Model: firstNonEmpty(modelOverride, ep.Model),
+	})
+}
+
+// ConsumeLive drains a live feed in a goroutine: decoded lines reach emit
+// stamped with their session time, pass failures reach fail. The goroutine
+// ends when the feed is stopped.
+func ConsumeLive(feed *transcribe.Session, clock *Clock, emit func(t float64, text string), fail func(error)) {
+	go func() {
+		for st := range feed.Updates() {
+			if st.Err != nil {
+				fail(st.Err)
+				continue
+			}
+			text := strings.TrimSpace(st.PassText)
+			if text == "" {
+				continue
+			}
+			t, ok := clock.FromAudioTime(float64(st.PassStartSample) / transcribe.SampleRate)
+			if !ok {
+				t = clock.Now()
+			}
+			emit(t, text)
+		}
+	}()
 }
 
 type Utterance struct {

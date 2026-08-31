@@ -73,7 +73,7 @@ var (
 func ClassifyHMR(payload string) *HMR {
 	var probe map[string]json.RawMessage
 	if json.Unmarshal([]byte(payload), &probe) != nil {
-		return nil
+		return classifyPhoenix(payload)
 	}
 	var typ string
 	if raw, ok := probe["type"]; !ok || json.Unmarshal(raw, &typ) != nil {
@@ -137,5 +137,49 @@ func ClassifyHMR(payload string) *HMR {
 		return h
 	}
 
+	return nil
+}
+
+// Phoenix channel frames are arrays: [joinRef, ref, topic, event, payload].
+// Only the phoenix:live_reload topic is dev-server traffic; LiveView diffs and
+// heartbeats are the application itself and stay unclassified.
+func classifyPhoenix(payload string) *HMR {
+	var arr []json.RawMessage
+	if json.Unmarshal([]byte(payload), &arr) != nil || len(arr) != 5 {
+		return nil
+	}
+	var topic, event string
+	if json.Unmarshal(arr[2], &topic) != nil || json.Unmarshal(arr[3], &event) != nil {
+		return nil
+	}
+	if topic != "phoenix:live_reload" {
+		return nil
+	}
+	switch event {
+	case "assets_change":
+		h := &HMR{Flavor: "phoenix", Type: "assets_change"}
+		var v struct {
+			AssetType string `json:"asset_type"`
+		}
+		if json.Unmarshal(arr[4], &v) == nil && v.AssetType != "" {
+			h.Files = []string{v.AssetType}
+		}
+		return h
+	case "phx_reply":
+		var v struct {
+			Status   string `json:"status"`
+			Response struct {
+				Message string `json:"message"`
+			} `json:"response"`
+		}
+		if json.Unmarshal(arr[4], &v) != nil || v.Status != "error" {
+			return nil
+		}
+		h := &HMR{Flavor: "phoenix", Type: "error"}
+		if v.Response.Message != "" {
+			h.Files = []string{v.Response.Message}
+		}
+		return h
+	}
 	return nil
 }

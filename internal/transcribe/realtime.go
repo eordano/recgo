@@ -9,10 +9,12 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,26 +23,58 @@ import (
 )
 
 const (
-	sampleRate      = 16000
+	SampleRate      = 16000
+	sampleRate      = SampleRate
 	bytesPerSample  = 2
 	qualityInterval = 3 * time.Second
 	minChunkSeconds = 0.5
 	maxWindow       = 25 * time.Second
 	maxRequestWait  = 90 * time.Second
 	stderrTailMax   = 2048
+
+	// whisper only reads the trailing ~224 tokens of the prompt; shipping the
+	// whole session transcript every pass grows quadratically (and would
+	// approach ARG_MAX as a whisper-cli argv element), so only the tail goes.
+	promptTailBytes = 1024
 )
+
+func promptTail(s string) string {
+	if len(s) <= promptTailBytes {
+		return s
+	}
+	cut := s[len(s)-promptTailBytes:]
+	if i := strings.IndexByte(cut, ' '); i >= 0 && i+1 < len(cut) {
+		cut = cut[i+1:]
+	}
+	return cut
+}
 
 type Config struct {
 	Endpoint string
 	APIKey   string
 	Model    string
+
+	LocalBin      string
+	LocalModel    string
+	LocalVADModel string
 }
 
 func (c Config) withDefaults() Config {
 	if c.Model == "" {
 		c.Model = "whisper"
 	}
+	if c.LocalBin == "" {
+		c.LocalBin = "whisper-cli"
+	}
 	return c
+}
+
+func (c Config) usesLocal() bool {
+	return c.Endpoint == "" && c.LocalModel != ""
+}
+
+func (c Config) configured() bool {
+	return c.Endpoint != "" || c.LocalModel != ""
 }
 
 type State struct {
@@ -48,6 +82,10 @@ type State struct {
 	Pending string
 	Fast    string
 	Err     error
+
+	PassText        string
+	PassStartSample int
+	PassEndSample   int
 }
 
 type Session struct {
@@ -73,25 +111,70 @@ type Session struct {
 
 	inflight sync.Mutex
 
+	interval time.Duration
+
 	updates chan State
+	emitMu  sync.Mutex
+	closed  bool
 	once    sync.Once
+
+	passFailed     atomic.Bool
+	promptRejected atomic.Bool
+
+	tmpWav string
 }
 
 func New(parent context.Context, mic string, cfg Config) *Session {
 	ctx, cancel := context.WithCancel(parent)
 	return &Session{
-		ctx:     ctx,
-		cancel:  cancel,
-		mic:     mic,
-		cfg:     cfg.withDefaults(),
-		updates: make(chan State, 16),
+		ctx:      ctx,
+		cancel:   cancel,
+		mic:      mic,
+		cfg:      cfg.withDefaults(),
+		interval: qualityInterval,
+		updates:  make(chan State, 16),
 	}
 }
 
-func (s *Session) Start() error {
-	if s.cfg.Endpoint == "" {
-		return fmt.Errorf("no transcription endpoint configured — set [transcription.remote] endpoint in the recgo config")
+// NewFeed builds a session that transcribes PCM the caller pushes via Feed
+// (16kHz mono s16le) instead of capturing a device itself.
+func NewFeed(parent context.Context, cfg Config) *Session {
+	return New(parent, "", cfg)
+}
+
+func (s *Session) StartFeed() error {
+	if !s.cfg.configured() {
+		return fmt.Errorf("no transcription backend configured -- set [transcription.remote] endpoint in the recgo config, or provide a local whisper model")
 	}
+	s.setupTmpWav()
+	go s.transcribeLoop()
+	return nil
+}
+
+// One temp WAV per session, rewritten each local pass, instead of a
+// create/unlink cycle every 3s for the whole recording. transcribeLoop owns
+// its removal; passes run synchronously inside the loop.
+func (s *Session) setupTmpWav() {
+	if !s.cfg.usesLocal() {
+		return
+	}
+	if f, err := os.CreateTemp("", "recgo-live-*.wav"); err == nil {
+		s.tmpWav = f.Name()
+		f.Close()
+	}
+}
+
+func (s *Session) Feed(pcm []byte) {
+	s.pcmMu.Lock()
+	s.pcm = append(s.pcm, pcm...)
+	s.pcmMu.Unlock()
+}
+
+func (s *Session) Start() error {
+	if !s.cfg.configured() {
+		return fmt.Errorf("no transcription backend configured -- set [transcription.remote] endpoint in the recgo config, or provide a local whisper model")
+	}
+	s.setupTmpWav()
 	var args []string
 	if runtime.GOOS == "darwin" {
 		args = append(audio.FFmpegInputArgs(s.mic),
@@ -170,7 +253,12 @@ func (s *Session) Stop() {
 			_ = s.cmd.Process.Kill()
 			<-s.procDone
 		}
+		// Take emitMu so no in-flight emit is holding a send on the channel
+		// when it closes; emit checks closed under the same lock.
+		s.emitMu.Lock()
+		s.closed = true
 		close(s.updates)
+		s.emitMu.Unlock()
 	})
 }
 
@@ -211,7 +299,10 @@ func (s *Session) consumeStderr(r io.Reader) {
 }
 
 func (s *Session) transcribeLoop() {
-	ticker := time.NewTicker(qualityInterval)
+	if s.tmpWav != "" {
+		defer os.Remove(s.tmpWav)
+	}
+	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -231,7 +322,7 @@ func (s *Session) doPass() {
 	s.stateMu.RLock()
 	skipSamples := s.lockedN
 	gen0 := s.gen
-	prompt := strings.TrimSpace(s.locked)
+	prompt := promptTail(strings.TrimSpace(s.locked))
 	s.stateMu.RUnlock()
 
 	chunk := s.snapshotTail(skipSamples)
@@ -250,14 +341,27 @@ func (s *Session) doPass() {
 	}
 
 	t0 := time.Now()
-	result, err := s.whisper(chunk, s.cfg.Model, prompt)
+	var result string
+	var err error
+	if s.cfg.usesLocal() {
+		result, err = s.whisperLocal(chunk, prompt)
+	} else {
+		result, err = s.whisper(chunk, s.cfg.Model, prompt)
+	}
 	dur := time.Since(t0)
 	sentSec := float64(len(chunk)) / float64(sampleRate*bytesPerSample)
 	unreadSec := float64(fullSamples) / float64(sampleRate)
 	if err != nil {
 		logging.Log("transcribe: pass failed (%dms, sent=%.1fs unread=%.1fs): %v", dur.Milliseconds(), sentSec, unreadSec, err)
+		// Surface the first failure to the Updates consumer; without this a
+		// missing binary, bad model, or dead endpoint looks identical to the
+		// user simply not speaking.
+		if s.ctx.Err() == nil && s.passFailed.CompareAndSwap(false, true) {
+			s.emit(State{Err: fmt.Errorf("live transcription pass failed: %w", err)})
+		}
 		return
 	}
+	s.passFailed.Store(false)
 	if dropped > 0 {
 		logging.Log("transcribe: pass ok (%dms, sent=%.1fs of %.1fs unread, dropped %.1fs) -> %q", dur.Milliseconds(), sentSec, unreadSec, float64(dropped)/float64(sampleRate*bytesPerSample), result)
 	} else {
@@ -276,6 +380,9 @@ func (s *Session) doPass() {
 	s.lockedN += fullSamples
 	snap := s.snapshot()
 	s.stateMu.Unlock()
+	snap.PassText = result
+	snap.PassStartSample = skipSamples + dropped/bytesPerSample
+	snap.PassEndSample = skipSamples + fullSamples
 	s.emit(snap)
 }
 
@@ -296,14 +403,39 @@ func (s *Session) snapshot() State {
 }
 
 func (s *Session) emit(st State) {
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	if s.closed {
+		return
+	}
 	select {
 	case s.updates <- st:
-	case <-s.ctx.Done():
 	default:
 	}
 }
 
+// Some OpenAI-compatible endpoints (e.g. speaches-plus) reject any decoder
+// prompt with a 400 rather than silently dropping it. Detect that once, retry
+// the pass without the prompt, and omit it for the rest of the session.
 func (s *Session) whisper(pcm []byte, model, prompt string) (string, error) {
+	if s.promptRejected.Load() {
+		prompt = ""
+	}
+	text, err := s.whisperOnce(pcm, model, prompt)
+	if err != nil && prompt != "" && isPromptRejected(err) {
+		s.promptRejected.Store(true)
+		logging.Log("transcribe: endpoint rejects decoder prompt, omitting it from now on: %v", err)
+		return s.whisperOnce(pcm, model, "")
+	}
+	return text, err
+}
+
+func isPromptRejected(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "whisper http 400") && strings.Contains(msg, "prompt")
+}
+
+func (s *Session) whisperOnce(pcm []byte, model, prompt string) (string, error) {
 	wav := pcmToWAV(pcm, sampleRate)
 
 	var body bytes.Buffer
@@ -358,6 +490,50 @@ func (s *Session) whisper(pcm []byte, model, prompt string) (string, error) {
 		return "", fmt.Errorf("parse whisper json: %w", err)
 	}
 	return strings.TrimSpace(out.Text), nil
+}
+
+func (s *Session) whisperLocal(pcm []byte, prompt string) (string, error) {
+	path := s.tmpWav
+	if path == "" {
+		f, err := os.CreateTemp("", "recgo-live-*.wav")
+		if err != nil {
+			return "", err
+		}
+		path = f.Name()
+		f.Close()
+		defer os.Remove(path)
+	}
+	if err := os.WriteFile(path, pcmToWAV(pcm, sampleRate), 0o600); err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(s.ctx, maxRequestWait)
+	defer cancel()
+	args := []string{"-m", s.cfg.LocalModel, "-f", path, "-np", "-nt"}
+	if s.cfg.LocalVADModel != "" {
+		args = append(args, "--vad", "--vad-model", s.cfg.LocalVADModel)
+	}
+	if prompt != "" {
+		args = append(args, "--prompt", prompt)
+	}
+	cmd := exec.CommandContext(ctx, s.cfg.LocalBin, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		tail := strings.TrimSpace(stderr.String())
+		if len(tail) > 200 {
+			tail = tail[len(tail)-200:]
+		}
+		return "", fmt.Errorf("%s: %v: %s", s.cfg.LocalBin, err, tail)
+	}
+	text := strings.Join(strings.Fields(stdout.String()), " ")
+	if strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]") {
+		text = ""
+	}
+	if strings.HasPrefix(text, "(") && strings.HasSuffix(text, ")") {
+		text = ""
+	}
+	return text, nil
 }
 
 func pcmToWAV(pcm []byte, rate int) []byte {

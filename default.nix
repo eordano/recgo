@@ -26,14 +26,13 @@ buildGoModule rec {
 
   src = ./.;
 
-  # Deps are vendored in-tree so the build needs no network.
   vendorHash = null;
 
   nativeBuildInputs = [ makeWrapper ];
 
   __darwinAllowLocalNetworking = true;
 
-  gstPlugins = lib.optionalString stdenv.isLinux (
+  gstPlugins = lib.optionalString stdenv.hostPlatform.isLinux (
     lib.makeSearchPath "lib/gstreamer-1.0" [
       gst_all_1.gstreamer
       gst_all_1.gst-plugins-base
@@ -51,8 +50,8 @@ buildGoModule rec {
                 rsync
                 openssh
               ]
-              ++ lib.optional stdenv.isLinux pulseaudio
-              ++ lib.optional stdenv.isDarwin switchaudio-osx
+              ++ lib.optional stdenv.hostPlatform.isLinux pulseaudio
+              ++ lib.optional stdenv.hostPlatform.isDarwin switchaudio-osx
             )
           }
 
@@ -84,15 +83,15 @@ buildGoModule rec {
             --prefix PATH : ${
               lib.makeBinPath (
                 [ ffmpeg ]
-                ++ lib.optional stdenv.isLinux chromium
+                ++ lib.optional stdenv.hostPlatform.isLinux chromium
                 ++ [ whisper-cpp ]
-                ++ lib.optionals stdenv.isLinux [
+                ++ lib.optionals stdenv.hostPlatform.isLinux [
                   gst_all_1.gstreamer
                   pulseaudio
                 ]
-                ++ lib.optional stdenv.isDarwin switchaudio-osx
+                ++ lib.optional stdenv.hostPlatform.isDarwin switchaudio-osx
               )
-            } ${lib.optionalString stdenv.isLinux ''
+            } ${lib.optionalString stdenv.hostPlatform.isLinux ''
               \
                 --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${
                   lib.makeSearchPath "lib/gstreamer-1.0" [
@@ -106,7 +105,7 @@ buildGoModule rec {
   '';
 
   meta = with lib; {
-    description = "A btop-inspired terminal audio recorder (plus recgo-tab, a browser-tab recorder)";
+    description = "A btop-inspired terminal audio recorder (plus recgo-browser, a browser-session recorder)";
     homepage = "https://github.com/eordano/recgo";
     license = licenses.mit;
     maintainers = [ ];

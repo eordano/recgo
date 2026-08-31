@@ -70,9 +70,39 @@
       name: el.getAttribute('name') ?? null,
       type: el.getAttribute('type') ?? null,
       href: el.getAttribute('href') ?? null,
-      text: (el.textContent ?? '').trim().slice(0, 120) || null,
+      // Own visible text, not textContent: the subtree text of a container
+      // is the entire page, which told a reader nothing 13 identical times.
+      text: ownText(el),
       rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
     };
+  };
+
+  const ownText = (el) => {
+    const t = (el.innerText ?? el.textContent ?? '').trim().replace(/\s+/g, ' ');
+    if (t && t.length <= 80) return t;
+    const label = el.getAttribute?.('aria-label');
+    return label || null;
+  };
+
+  // An "interactive ancestor" that spans most of the viewport is a
+  // delegation root (SPA containers carry role/tabindex/onclick too), not
+  // the control the user clicked.
+  const isControl = (n) => {
+    if (!(n instanceof Element)) return false;
+    if (
+      !n.matches(
+        'a,button,input,select,textarea,summary,[onclick],' +
+          '[role="button"],[role="link"],[role="tab"],[role="menuitem"],' +
+          '[role="checkbox"],[role="radio"],[role="option"],[role="switch"],' +
+          '[tabindex]:not([tabindex="-1"])',
+      )
+    ) {
+      return false;
+    }
+    const r = n.getBoundingClientRect();
+    const area = r.width * r.height;
+    const viewport = innerWidth * innerHeight || 1;
+    return area / viewport < 0.5;
   };
 
   // pointerdown is the closest event to the physical press; `click` is the
@@ -93,6 +123,16 @@
       const downT = lastDown && e.timeStamp - lastDown.t < 2000 ? lastDown.t : e.timeStamp;
       const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
 
+      const target = describe(e.target);
+      // The nearest interactive ancestor is usually what the developer means
+      // by "the button", even when the click landed on a span inside it.
+      const interactive = describe(path.find(isControl) ?? null);
+      if (interactive && !interactive.text && target?.text) {
+        // The ancestor's identity with the clicked node's words: "clicked
+        // the span 'V1' inside that button" is what a reader needs.
+        interactive.text = target.text;
+      }
+
       emit({
         kind: 'click',
         timeOrigin: performance.timeOrigin,
@@ -103,16 +143,8 @@
         y: e.clientY,
         url: location.href,
         title: document.title,
-        target: describe(e.target),
-        // The nearest interactive ancestor is usually what the developer means
-        // by "the button", even when the click landed on a span inside it.
-        interactive: describe(
-          path.find(
-            (n) =>
-              n instanceof Element &&
-              (n.matches('a,button,input,select,textarea,[role],[onclick],[tabindex]') ?? false),
-          ) ?? null,
-        ),
+        target,
+        interactive,
       });
     },
     { capture: true, passive: true },
@@ -168,10 +200,12 @@
 
     // AudioContext.currentTime and performance.now() share timeOrigin via
     // getOutputTimestamp when available; fall back to now + the lead-in.
+    // A context that has not rendered audio yet reports zeros, and trusting
+    // them anchors the tone at page load -- minutes off on a long-open tab.
     let pageTime = performance.now() + 50;
     if (typeof ctx.getOutputTimestamp === 'function') {
       const ts = ctx.getOutputTimestamp();
-      if (ts && ts.contextTime != null && ts.performanceTime != null) {
+      if (ts && ts.contextTime > 0 && ts.performanceTime > 0) {
         pageTime = ts.performanceTime + (startAt - ts.contextTime) * 1000;
       }
     }

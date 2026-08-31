@@ -46,33 +46,7 @@ A warning will appear at the bottom of the settings panel if there are unsaved c
 - **Show VU Meters**: Show/hide VU meters (true, false)
 - **Refresh Rate (FPS)**: UI refresh rate in FPS (1-60)
 
-## Implementation Details
+## Implementation
 
-The settings panel is implemented in `internal/ui/settings.go` and follows the existing btop-inspired styling.
-
-### Key Features
-
-- **Vim-like navigation**: Familiar keybindings for power users
-- **In-place editing**: Edit settings directly in the TUI using text input
-- **Visual feedback**:
-  - Selected items are highlighted
-  - Current category is shown with a separator
-  - Help text appears for each field
-  - Modified indicator shows when changes haven't been saved
-- **Validation**: Settings are validated before being saved
-- **Centered layout**: The settings panel is centered on screen for better readability
-
-### Code Structure
-
-The `SettingsPanel` struct maintains:
-- Reference to the config
-- Current mode (navigation or edit)
-- Selected field index
-- Text input component for editing
-- Modified flag to track unsaved changes
-
-The panel integrates with the existing `Model` through:
-- A new `ModeSettings` app mode
-- Keybindings for opening/closing (`c` key)
-- Keybinding for saving config (`Ctrl+S`)
-- Rendering in full-screen overlay mode
+`internal/ui/settings.go` (`SettingsPanel`, rendered as a full-screen overlay
+under the `ModeSettings` app mode). Values are validated before saving.

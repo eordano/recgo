@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>recgo sessions</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root {
+  --bg:#F2EDE4; --panel:#FAF6EE; --well:#ECE6DB; --hover:#EAE3D6;
+  --ink:#1A1A1A; --body:#2B2B2B; --muted:#645C55;
+  --border:#D4CFC9; --divider:#E2DBD0;
+  --acc-events:#8B6B2A; --acc-speech:#5A6E5A; --acc-lang:#6E5A3C;
+  --acc-turn:#5A6B7A; --acc-vision:#7A4848; --acc-danger:#A8201A;
+  --shadow-card:0 1px 2px rgba(20,16,12,.04);
+  --serif:'Source Serif 4',Georgia,serif; --ui:system-ui,sans-serif;
+  --mono:ui-monospace,Menlo,monospace;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --bg:#191512; --panel:#211C17; --well:#14100D; --hover:#2B241D;
+  --ink:#F0EADC; --body:#DDD5C5; --muted:#A29886;
+  --border:#3D362B; --divider:#2E2820;
+  --acc-events:#C9A155; --acc-speech:#93B093; --acc-lang:#BAA07C;
+  --acc-turn:#8FA6BC; --acc-vision:#C58787; --acc-danger:#E0574E;
+  --shadow-card:0 1px 2px rgba(0,0,0,.3);
+  color-scheme: dark;
+}
+* { box-sizing:border-box; margin:0 }
+html, body { height:100% }
+body {
+  background:var(--bg); color:var(--body);
+  font:14px/1.45 var(--ui);
+  display:grid; grid-template-columns:288px 1fr 400px;
+  height:100vh; overflow:hidden;
+}
+.cap { font:400 9.5px var(--ui); letter-spacing:.12em; text-transform:uppercase; color:var(--muted) }
+.cap .dot { color:var(--acc-events); margin-right:5px }
+.chip {
+  font:600 9.5px var(--mono); border:1px solid var(--border); border-radius:4px;
+  background:var(--bg); color:var(--muted); padding:2px 7px;
+}
+#side { border-right:1px solid var(--border); background:var(--panel); overflow-y:auto; display:flex; flex-direction:column }
+#brand { display:flex; align-items:center; gap:10px; padding:16px 16px 12px; border-bottom:1px solid var(--divider) }
+#brand .mark { font:700 19px var(--serif); color:var(--ink) }
+#brand .mark i { font-weight:400 }
+#brand .spacer { flex:1 }
+#theme {
+  font:600 9.5px var(--mono); border:1px solid var(--border); border-radius:4px;
+  background:var(--bg); color:var(--muted); padding:3px 8px; cursor:pointer;
+}
+#theme:hover { color:var(--ink); border-color:var(--muted) }
+#sesslist { padding:12px; display:flex; flex-direction:column; gap:10px }
+.sess {
+  border:1px solid var(--border); border-radius:8px; background:var(--panel);
+  box-shadow:var(--shadow-card); cursor:pointer; overflow:hidden;
+}
+.sess:hover { background:var(--hover) }
+.sess.active { border-color:var(--ink) }
+.sess img { width:100%; height:92px; object-fit:cover; object-position:top; display:block; border-bottom:1px solid var(--divider) }
+.sess .pad { padding:9px 11px 10px }
+.sess .name { font:600 14px var(--serif); color:var(--ink); overflow-wrap:anywhere; margin-bottom:3px }
+.sess .meta { font:400 10.5px var(--mono); color:var(--muted) }
+#main { display:flex; flex-direction:column; min-width:0; overflow:hidden; background:var(--bg) }
+#header { padding:14px 20px 10px; border-bottom:1px solid var(--divider); background:var(--panel) }
+#htitle { font:700 19px var(--serif); color:var(--ink) }
+#hsub { font:400 11px var(--mono); color:var(--muted); margin-top:3px; overflow-wrap:anywhere }
+#hnote { font:italic 400 12px var(--serif); color:var(--acc-danger); margin-top:3px }
+#stage { flex:1; display:flex; align-items:center; justify-content:center; padding:16px; min-height:0; background:var(--well) }
+#framewrap { position:relative; display:inline-block; max-width:100%; max-height:100% }
+#frame {
+  display:block; max-width:100%; max-height:calc(100vh - 330px);
+  border:1px solid var(--border); border-radius:8px; background:var(--panel);
+  box-shadow:var(--shadow-card);
+}
+#dot {
+  position:absolute; width:26px; height:26px; border-radius:50%;
+  border:3px solid var(--acc-danger); transform:translate(-50%,-50%);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--acc-danger) 25%, transparent);
+  pointer-events:none; display:none;
+}
+#dot::after { content:""; position:absolute; inset:8px; border-radius:50%; background:var(--acc-danger) }
+#controls {
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  padding:10px 20px; border-top:1px solid var(--divider); background:var(--panel);
+}
+.seg { display:flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; background:var(--bg) }
+.seg button {
+  background:transparent; color:var(--muted); border:0; padding:6px 13px;
+  font:600 11px var(--ui); cursor:pointer;
+}
+.seg button + button { border-left:1px solid var(--border) }
+.seg button.on { background:var(--ink); color:var(--bg) }
+.seg button:disabled { opacity:.4; cursor:default }
+.btn {
+  background:var(--bg); color:var(--body); border:1px solid var(--border);
+  border-radius:8px; padding:6px 13px; font:600 11px var(--ui);
+  cursor:pointer; text-decoration:none;
+}
+.btn:hover { background:var(--hover); color:var(--ink) }
+label.toggle { font:400 11px var(--ui); color:var(--muted); display:flex; gap:6px; align-items:center; cursor:pointer }
+#clickinfo { flex:1; min-width:180px; font:400 12px var(--ui); color:var(--muted); overflow-wrap:anywhere }
+#clickinfo b { font:600 12px var(--mono); color:var(--ink) }
+#clickinfo .norepaint { color:var(--acc-danger); font-style:italic }
+#keys { font:400 9.5px var(--mono); color:var(--muted); flex:none }
+#audiobar { display:flex; align-items:center; gap:14px; padding:8px 20px; background:var(--panel); border-top:1px solid var(--divider) }
+#audio { flex:1; height:34px }
+#strip {
+  display:flex; gap:7px; overflow-x:auto; padding:10px 20px 13px;
+  background:var(--panel); border-top:1px solid var(--divider); scrollbar-width:thin;
+}
+.thumb { position:relative; flex:0 0 auto; cursor:pointer }
+.thumb img {
+  height:58px; display:block; border-radius:4px;
+  border:2px solid var(--border); opacity:.72; background:var(--well);
+}
+.thumb:hover img { opacity:1 }
+.thumb.active img { border-color:var(--ink); opacity:1 }
+.thumb .n {
+  position:absolute; left:3px; bottom:3px; font:600 9px var(--mono);
+  padding:0 4px; background:var(--panel); border-radius:3px; color:var(--muted);
+}
+.thumb.active .n { color:var(--ink) }
+#timeline { border-left:1px solid var(--border); background:var(--panel); overflow-y:auto }
+#timeline h2 { padding:16px 16px 8px; position:sticky; top:0; background:var(--panel) }
+.ev { padding:9px 16px; border-bottom:1px solid var(--divider); font:400 13px var(--ui) }
+.ev .t { font:400 10px var(--mono); color:var(--muted); margin-right:8px }
+.ev.narration {
+  font:italic 400 13.5px/1.55 var(--serif); color:var(--body);
+  border-left:2px solid var(--acc-events); background:var(--bg);
+}
+.ev.click { cursor:pointer; border-left:2px solid transparent }
+.ev.click:hover { background:var(--hover) }
+.ev.click.active { background:var(--hover); border-left-color:var(--ink) }
+.ev.click .label { color:var(--ink) }
+.ev.click .sel { font:400 10px var(--mono); color:var(--muted); overflow-wrap:anywhere; margin-top:2px }
+.ev .badge {
+  display:inline-block; font:600 9px var(--mono); border-radius:4px;
+  border:1px solid var(--border); padding:1px 6px; margin-left:6px; vertical-align:1px;
+}
+.badge.img { color:var(--acc-turn); border-color:color-mix(in srgb, var(--acc-turn) 45%, var(--border)) }
+.badge.nr { color:var(--acc-events); border-color:color-mix(in srgb, var(--acc-events) 45%, var(--border)) }
+.ev.error, .ev[class*="console"] { color:var(--acc-danger); font:400 12px var(--mono) }
+@media (max-width:1100px) {
+  body { grid-template-columns:230px 1fr; grid-template-rows:1fr 260px }
+  #timeline { grid-column:1 / -1; border-left:0; border-top:1px solid var(--border) }
+}
+</style>
+</head>
+<body>
+<nav id="side">
+  <div id="brand">
+    <span class="mark">recgo <i>sessions</i></span>
+    <span class="chip" id="count"></span>
+    <span class="spacer"></span>
+    <button id="theme"></button>
+  </div>
+  <div id="sesslist"></div>
+</nav>
+<main id="main">
+  <div id="header">
+    <div id="htitle"></div>
+    <div id="hsub"></div>
+    <div id="hnote"></div>
+  </div>
+  <div id="stage"><div id="framewrap"><img id="frame" alt=""><div id="dot"></div></div></div>
+  <div id="controls">
+    <div class="seg" id="phaseseg">
+      <button data-p="before">−100ms</button>
+      <button data-p="at" class="on">click</button>
+      <button data-p="after">+100ms</button>
+    </div>
+    <button class="btn" id="prev">←</button>
+    <button class="btn" id="next">→</button>
+    <a class="btn" id="fullres" target="_blank">full res ↗</a>
+    <label class="toggle"><input type="checkbox" id="showdot" checked> click marker</label>
+    <div id="clickinfo"></div>
+    <span id="keys">←→ frame · 1 2 3 phase · m marker</span>
+  </div>
+  <div id="audiobar"><label class="toggle"><input type="checkbox" id="follow" checked> follow audio</label><audio id="audio" controls preload="none"></audio></div>
+  <div id="strip"></div>
+</main>
+<aside id="timeline"><h2 class="cap"><span class="dot">●</span>Timeline</h2><div id="evlist"></div></aside>
+<script>
+const DATA = __DATA__;
+const $ = id => document.getElementById(id);
+let si = 0, fi = 0, phase = "at";
+
+const pad = n => String(n).padStart(2, "0");
+const fmt = t => pad(Math.floor(t / 60)) + ":" + pad(t % 60);
+
+const THEME_KEY = "recgo-sessions-theme";
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem(THEME_KEY, t);
+  $("theme").textContent = t === "dark" ? "light mode" : "dark mode";
+}
+$("theme").onclick = () =>
+  setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+
+function buildSessions() {
+  $("count").textContent = DATA.length;
+  const list = $("sesslist");
+  DATA.forEach((s, i) => {
+    const card = document.createElement("div");
+    card.className = "sess";
+    const shot = document.createElement("img");
+    shot.loading = "lazy";
+    shot.src = s.dir + "/0001.png";
+    const pad = document.createElement("div");
+    pad.className = "pad";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = s.title;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const narr = s.events.filter(e => e.kind === "narration").length;
+    meta.textContent = (s.start || s.dir) + " · " + fmt(s.duration) + " · " +
+      (s.frames.length - 1) + " shots" + (narr ? " · narrated" : "");
+    pad.append(name, meta);
+    card.append(shot, pad);
+    card.onclick = () => selectSession(i);
+    list.appendChild(card);
+  });
+}
+
+function selectSession(i) {
+  si = i; fi = 0; phase = "at";
+  const s = DATA[si];
+  document.querySelectorAll(".sess").forEach((el, j) => el.classList.toggle("active", j === si));
+  $("htitle").textContent = s.title;
+  $("hsub").textContent = [s.start, s.page, s.recorded].filter(Boolean).join("  ·  ");
+  $("hnote").textContent = s.notes.join(" ");
+  const audio = $("audio");
+  audio.pause();
+  if (s.audio) { audio.src = s.dir + "/audio.wav"; $("audiobar").style.display = "flex"; }
+  else { audio.removeAttribute("src"); $("audiobar").style.display = "none"; }
+  buildStrip(); buildTimeline(); showFrame(0, "at");
+}
+
+function buildStrip() {
+  const s = DATA[si], strip = $("strip");
+  strip.textContent = "";
+  s.frames.forEach((f, i) => {
+    const d = document.createElement("div");
+    d.className = "thumb";
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.src = s.dir + "/" + f.img;
+    const n = document.createElement("div");
+    n.className = "n";
+    n.textContent = f.start ? "start" : f.img.replace(".png", "").replace(/^0+/, "");
+    d.append(img, n);
+    d.onclick = () => { unfollow(); showFrame(i, "at"); };
+    strip.appendChild(d);
+  });
+}
+
+function buildTimeline() {
+  const s = DATA[si], list = $("evlist");
+  list.textContent = "";
+  s.events.forEach(ev => {
+    const d = document.createElement("div");
+    d.className = "ev " + ev.kind;
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = fmt(ev.t);
+    d.appendChild(t);
+    if (ev.kind === "click") {
+      const idx = s.frames.findIndex(f => f.img === ev.img && !f.start);
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = ev.text || "(no text)";
+      const badge = document.createElement("span");
+      badge.className = "badge img";
+      badge.textContent = ev.img.replace(".png", "");
+      d.append(label, badge);
+      if (ev.norepaint) {
+        const b = document.createElement("span");
+        b.className = "badge nr";
+        b.textContent = "no repaint";
+        d.appendChild(b);
+      }
+      if (ev.sel) {
+        const sel = document.createElement("div");
+        sel.className = "sel";
+        sel.textContent = (ev.x != null ? ev.x + "," + ev.y + "  " : "") + ev.sel;
+        d.appendChild(sel);
+      }
+      d.dataset.frame = idx;
+      d.onclick = () => { unfollow(); showFrame(idx, "at"); };
+    } else {
+      const txt = document.createElement("span");
+      txt.textContent = (ev.kind === "narration" ? "" : ev.kind + ": ") + ev.text;
+      d.appendChild(txt);
+    }
+    list.appendChild(d);
+  });
+}
+
+function showFrame(i, ph) {
+  const s = DATA[si];
+  fi = Math.max(0, Math.min(i, s.frames.length - 1));
+  const f = s.frames[fi];
+  if (f.start && ph !== "at") ph = "at";
+  phase = ph;
+  const suffix = ph === "at" ? "" : "-" + ph;
+  $("frame").src = s.dir + "/" + f.img.replace(".png", suffix + ".png");
+  $("fullres").href = s.dir + "/" + f.img.replace(".png", f.start ? ".png" : "-full.png");
+  document.querySelectorAll("#phaseseg button").forEach(b => {
+    b.classList.toggle("on", b.dataset.p === phase);
+    b.disabled = f.start && b.dataset.p !== "at";
+  });
+  const dot = $("dot");
+  if (f.fx != null && $("showdot").checked) {
+    dot.style.left = f.fx * 100 + "%";
+    dot.style.top = f.fy * 100 + "%";
+    dot.style.display = "block";
+  } else dot.style.display = "none";
+  const info = $("clickinfo");
+  info.textContent = "";
+  const head = document.createElement("b");
+  head.textContent = f.start ? "session start · 0001.png" : fmt(f.t) + " · " + f.img;
+  info.appendChild(head);
+  if (!f.start) {
+    info.append("  " + (f.text || f.sel || ""));
+    if (f.norepaint) {
+      const w = document.createElement("span");
+      w.className = "norepaint";
+      w.textContent = " — screen did not repaint";
+      info.appendChild(w);
+    }
+  }
+  document.querySelectorAll(".thumb").forEach((el, j) => {
+    el.classList.toggle("active", j === fi);
+    if (j === fi) el.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+  document.querySelectorAll(".ev.click").forEach(el => {
+    const on = +el.dataset.frame === fi;
+    el.classList.toggle("active", on);
+    if (on) el.scrollIntoView({ block: "nearest" });
+  });
+  history.replaceState(null, "", "#s=" + si + "&f=" + fi);
+}
+
+function unfollow() { $("follow").checked = false; }
+
+$("prev").onclick = () => { unfollow(); showFrame(fi - 1, phase); };
+$("next").onclick = () => { unfollow(); showFrame(fi + 1, phase); };
+$("showdot").onchange = () => showFrame(fi, phase);
+document.querySelectorAll("#phaseseg button").forEach(b => b.onclick = () => showFrame(fi, b.dataset.p));
+$("audio").addEventListener("timeupdate", () => {
+  if (!$("follow").checked) return;
+  const s = DATA[si], t = $("audio").currentTime;
+  let best = 0;
+  s.frames.forEach((f, i) => { if (f.t <= t) best = i; });
+  if (best !== fi) showFrame(best, "at");
+});
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if (e.key === "ArrowLeft") { unfollow(); showFrame(fi - 1, phase); }
+  else if (e.key === "ArrowRight") { unfollow(); showFrame(fi + 1, phase); }
+  else if (e.key === "1") showFrame(fi, "before");
+  else if (e.key === "2") showFrame(fi, "at");
+  else if (e.key === "3") showFrame(fi, "after");
+  else if (e.key === "m") { $("showdot").checked = !$("showdot").checked; showFrame(fi, phase); }
+});
+
+const h = new URLSearchParams(location.hash.slice(1));
+setTheme(h.get("theme") || localStorage.getItem(THEME_KEY) ||
+  (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+buildSessions();
+selectSession(Math.min(+h.get("s") || 0, DATA.length - 1));
+if (h.get("f")) showFrame(+h.get("f"), "at");
+</script>
+</body>
+</html>

@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -97,6 +98,64 @@ func TestFindToneOnsetSurvivesNoise(t *testing.T) {
 	}
 	if math.Abs(got-1200) > 30 {
 		t.Errorf("detected at %vms, want ~1200ms", got)
+	}
+}
+
+func TestFindToneOnsetIgnoresLateEnergy(t *testing.T) {
+	late := toneSearchMs + 15_000.0
+	wav := buildWav(t, late+10_000, late, 2000, 0.5, 0.002)
+	if got, ok := findToneOnset(wav, toneFreqHz); ok {
+		t.Errorf("1kHz energy at %vms (outside the search window) reported as the tone at %vms — "+
+			"this is how a whole session's narration ends up before 00.00.00", late, got)
+	}
+}
+
+func TestToneAnchorPlausibility(t *testing.T) {
+	cases := []struct {
+		name      string
+		firstByte float64
+		corrected float64
+		want      bool
+	}{
+		{"typical capture latency", 50, -80, true},
+		{"large but sane latency", 100, -10_000, true},
+		{"slight clock error forward", 50, 1000, true},
+		{"stale page timestamp shifts anchor minutes early", 50, -170_000, false},
+		{"anchor after first byte", 50, 3000, false},
+	}
+	for _, c := range cases {
+		if got := toneAnchorPlausible(c.firstByte, c.corrected); got != c.want {
+			t.Errorf("%s: toneAnchorPlausible(%v, %v) = %v, want %v",
+				c.name, c.firstByte, c.corrected, got, c.want)
+		}
+	}
+}
+
+func TestToneAnchorDecision(t *testing.T) {
+	base := "First-byte estimate."
+
+	anchor, note := toneAnchor(50, 3400, 3700, true, base)
+	if anchor != -300 {
+		t.Errorf("plausible onset: anchor %v, want -300", anchor)
+	}
+	if !strings.Contains(note, "Anchored by calibration tone") {
+		t.Errorf("plausible onset note %q does not say it anchored", note)
+	}
+
+	anchor, note = toneAnchor(50, -170_000, 3700, true, base)
+	if anchor != 50 {
+		t.Errorf("implausible onset: anchor %v, want first-byte 50", anchor)
+	}
+	if !strings.HasPrefix(note, base) || !strings.Contains(note, "implausible anchor") {
+		t.Errorf("implausible onset note %q must keep the base note and explain the rejection", note)
+	}
+
+	anchor, note = toneAnchor(50, 3400, 0, false, base)
+	if anchor != 50 {
+		t.Errorf("tone not found: anchor %v, want first-byte 50", anchor)
+	}
+	if !strings.Contains(note, "not found") {
+		t.Errorf("tone-not-found note %q does not say so", note)
 	}
 }
 

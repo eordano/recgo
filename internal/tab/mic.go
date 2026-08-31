@@ -21,6 +21,12 @@ const (
 	micRate     = 16_000
 	micChannels = 1
 	toneFreqHz  = 1000.0
+
+	// The calibration tone is played within the first seconds of a session.
+	// Searching the whole file let 1kHz-heavy speech minutes in masquerade as
+	// the tone and shift the audio anchor by minutes, so the scan is confined
+	// to the head of the recording.
+	toneSearchMs = 15_000
 )
 
 type MicOptions struct {
@@ -28,6 +34,7 @@ type MicOptions struct {
 	OutDir    string
 	Device    string
 	FFmpegBin string
+	Tap       func(pcm []byte)
 }
 
 type Mic struct {
@@ -133,6 +140,9 @@ func StartMic(o MicOptions) (*Mic, error) {
 				m.bytes += int64(n)
 				m.mu.Unlock()
 				raw.Write(buf[:n])
+				if m.opts.Tap != nil {
+					m.opts.Tap(append([]byte(nil), buf[:n]...))
+				}
 			}
 			if err != nil {
 				return
@@ -215,20 +225,10 @@ func (m *Mic) Stop() MicResult {
 
 	note := m.opts.Clock.AudioStartNote
 	if toneWanted {
-		if onsetMs, ok := findToneOnset(m.wavPath, toneFreqHz); ok {
-			corrected := toneAt - onsetMs
-			prev := m.opts.Clock.AudioStartMs
-			note = fmt.Sprintf(
-				"Anchored by calibration tone: played at t=%.1fms, found %.1fms into the "+
-					"recording, so sample zero is t=%.1fms. First-byte estimate was %.1fms "+
-					"(ffmpeg capture latency measured at %.1fms).",
-				toneAt, onsetMs, corrected, prev, prev-corrected)
-			m.opts.Clock.SetAudioStart(corrected, note)
-		} else {
-			note += " Calibration tone was emitted but not found in the capture " +
-				"(headphones, or the tone was inaudible to this device); anchor left uncorrected."
-			m.opts.Clock.SetAudioStart(m.opts.Clock.AudioStartMs, note)
-		}
+		onsetMs, found := findToneOnset(m.wavPath, toneFreqHz)
+		var anchor float64
+		anchor, note = toneAnchor(m.opts.Clock.AudioStartMs, toneAt, onsetMs, found, note)
+		m.opts.Clock.SetAudioStart(anchor, note)
 	}
 
 	return MicResult{
@@ -238,6 +238,38 @@ func (m *Mic) Stop() MicResult {
 		Duration: float64(n) / float64(micRate*micChannels*2),
 		Note:     note,
 	}
+}
+
+// The tone correction can only shrink the first-byte estimate by capture
+// latency (well under toneSearchMs) or grow it by clock error (well under a
+// second). Anything outside that window means the tone timestamp or the onset
+// detection is wrong -- seen in the wild when a long-open page reported the
+// tone as played at page load, which shifted every narration line minutes
+// early.
+func toneAnchorPlausible(firstByteMs, correctedMs float64) bool {
+	drift := firstByteMs - correctedMs
+	return drift >= -2000 && drift <= toneSearchMs
+}
+
+// toneAnchor decides the final audio anchor from the tone evidence: the
+// corrected anchor when the detected onset is plausible, the first-byte
+// estimate otherwise, always with a note recording which was used and why.
+func toneAnchor(firstByteMs, toneAt, onsetMs float64, found bool, baseNote string) (float64, string) {
+	if !found {
+		return firstByteMs, baseNote + " Calibration tone was emitted but not found in the capture " +
+			"(headphones, or the tone was inaudible to this device); anchor left uncorrected."
+	}
+	corrected := toneAt - onsetMs
+	if !toneAnchorPlausible(firstByteMs, corrected) {
+		return firstByteMs, baseNote + fmt.Sprintf(" Calibration tone gave an implausible anchor "+
+			"(t=%.1fms vs first-byte estimate %.1fms) -- the page reported a stale "+
+			"tone timestamp or the detection hit speech; anchor left uncorrected.",
+			corrected, firstByteMs)
+	}
+	return corrected, fmt.Sprintf(
+		"Anchored by calibration tone: sample zero at t=%.0fms "+
+			"(tone at %.0fms found %.0fms into the wav; capture latency %.0fms).",
+		corrected, toneAt, onsetMs, firstByteMs-corrected)
 }
 
 func tail(s string, n int) string {
@@ -290,6 +322,9 @@ func findToneOnset(wavPath string, freq float64) (float64, bool) {
 	}
 	pcm := data[44:]
 	total := len(pcm) / 2
+	if max := int(toneSearchMs / 1000 * micRate); total > max {
+		total = max
+	}
 
 	const windowSamples = 160
 	if total < windowSamples*4 {

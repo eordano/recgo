@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Recgo</string>
+	<key>CFBundleDisplayName</key>
+	<string>Recgo</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.eordano.recgo</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleExecutable</key>
+	<string>Recgo</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Recgo records your narration while you walk through a bug or a review.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Recgo starts and stops its bundled recorders.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
