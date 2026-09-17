@@ -26,6 +26,11 @@
             mainProgram = "recgo-desktop";
           };
         });
+        recgo-window = recgo.overrideAttrs (old: {
+          meta = old.meta // {
+            mainProgram = "recgo-window";
+          };
+        });
         default = recgo;
       });
     };

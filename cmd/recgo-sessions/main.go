@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/eordano/recgo/internal/tab"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -56,7 +57,7 @@ var (
 )
 
 func main() {
-	dir := flag.String("dir", "", "sessions root (default $XDG_DOCUMENTS_DIR/walk-and-talk)")
+	dir := flag.String("dir", "", "sessions root (default: [recording] output_dir in config.toml, else ~/walk-and-talk; ~/Documents/walk-and-talk on macOS)")
 	out := flag.String("out", "", "output file (default <dir>/index.html)")
 	flag.Parse()
 
@@ -94,18 +95,14 @@ func main() {
 // defaultRoot mirrors recgo-tab's output root, including its iCloud fallback
 // location, so the viewer finds sessions wherever the recorder put them.
 func defaultRoot() string {
-	docs := os.Getenv("XDG_DOCUMENTS_DIR")
-	if docs == "" {
-		home, _ := os.UserHomeDir()
-		docs = filepath.Join(home, "Documents")
+	root := tab.DefaultOutRoot()
+	if _, err := os.Stat(root); err == nil {
+		return root
 	}
-	root := filepath.Join(docs, "walk-and-talk")
-	if _, err := os.Stat(root); err != nil {
-		home, _ := os.UserHomeDir()
-		if alt := filepath.Join(home, "walk-and-talk"); home != "" {
-			if _, err := os.Stat(alt); err == nil {
-				return alt
-			}
+	home, _ := os.UserHomeDir()
+	for _, alt := range []string{filepath.Join(home, "walk-and-talk"), filepath.Join(tab.DocumentsDir(), "walk-and-talk")} {
+		if _, err := os.Stat(alt); err == nil {
+			return alt
 		}
 	}
 	return root

@@ -8,7 +8,7 @@ LLM can act on.
 recgo-tab --launch http://localhost:5173 --duration 30s
 ```
 
-Output lands in `$XDG_DOCUMENTS_DIR/walk-and-talk/YYYY-MM-DD-HH-MM-<slug>/`:
+Output lands in `~/walk-and-talk/YYYY-MM-DD-HH-MM-<slug>/` (`[recording] output_dir` in `~/.config/recgo/config.toml` overrides; macOS keeps `~/Documents/walk-and-talk`):
 
 ```
 SESSION.md     the deliverable, and the only document — one line per thing that happened
@@ -18,6 +18,13 @@ audio.wav      narration, 16kHz mono
 logs/          raw dev-server websocket frames, including all HMR payloads
 session.json   only with --json: full machine-readable timeline and clock report
 ```
+
+When the recorder pushes the finished session (`--sync-target`, or the
+`[upload] target` in `config.toml`) it prints `synced -> host:/path`, and when
+that remote directory is also mounted on this machine it adds
+`shared -> /path/<session>`: when the session root is mounted at the same
+absolute path everywhere, that line pastes unchanged into an agent on any
+other host.
 
 ## The document
 
@@ -90,6 +97,49 @@ with word timings and VAD correction; nothing from the preview leaks into it.
 the same live decode -- in the follow TUI's narration panel and in the same
 stderr stream + `SESSION.live.md` recgo-tab writes, respectively -- so the
 terminal confirms that speech is actually being decoded while you record.
+
+## Picking the tab
+
+Without flags the first page target the browser lists is recorded. `--match`
+takes the first tab whose URL or title contains the string, `--select` opens a
+picker in the terminal, and `--target <id>` attaches to one exact CDP target
+id (what `/json/list` reports) -- the handle a GUI picker should pass, since a
+URL substring can hit a sibling tab. Whichever way, two lines announce the
+choice on stderr:
+
+```
+attached to: Acme dashboard
+tab: 1CB04B15172C3CCDF6C7E401DBEE46BB http://localhost:5173/
+```
+
+The id stays valid across navigations, so a shell keeps the title and URL
+current by looking it up in `/json/list`; `Navigate:` lines in the document
+carry the same URL changes.
+
+`--launch` / `--headless` refuse a port that already answers: the throwaway
+browser would lose the port to the one already there, and the session would
+attach to -- and navigate -- one of *its* tabs. Pass `--port` for a launched
+instance whenever a browser of your own sits on 9222.
+
+## System audio
+
+`--system-audio <source>` mixes what you hear into the narration track:
+a `<sink>.monitor` source on PipeWire/PulseAudio (a loopback device such as
+BlackHole on macOS), or `default` for the default output's monitor. ffmpeg
+opens it as a second input and `amix`es both at unity gain into the same
+16kHz mono `audio.wav`, so the clock and the calibration tone are unchanged --
+the tone is in fact heard more reliably, since the monitor carries it even on
+headphones. Bluetooth outputs on PipeWire yield nothing from their monitor;
+those go through a temporary null sink that becomes the default output for
+the session and is removed at stop, the recipe the `recgo` TUI already uses.
+
+While recording, `sysaudio off` / `sysaudio on` on stdin mute and unmute the
+monitor capture stream in place (`pactl set-source-output-mute` on the stream
+named `recgo-system-audio`), the mix keeps running, and each toggle lands in
+the document as `Note: system audio off` / `on`, so a reader knows why the
+room went quiet. `stderr` echoes `system audio: off|on`. The closing block of
+`SESSION.md` names the monitor when one was mixed in. All three recorders
+(`recgo-tab`, `recgo-browser`, `recgo-desktop`) take the flag and the command.
 
 ## What it captures
 
@@ -175,7 +225,8 @@ emit a 1kHz tone at a known browser timestamp and locates it in the capture with
 a Goertzel filter, making ffmpeg's capture latency a measurement.
 
 This needs the tone to actually reach the capture device: speakers into a
-microphone, or `--mic` pointed at a `.monitor` source. On headphones the tone is
+microphone, `--mic` pointed at a `.monitor` source, or `--system-audio` mixing
+one in. On headphones without it the tone is
 never heard, and the anchor falls back to the first-byte estimate — reported
 plainly in `SESSION.md`'s "How this was captured" block (and in `session.json`
 under `--json`) rather than papered over.
@@ -239,8 +290,8 @@ meeting recording. So:
 - **Nothing is uploaded.** recgo's `internal/upload` ships finished recordings to
   a remote endpoint; recgo-tab never imports it, and a test enforces that.
 - **The output path stays out of backup sweeps.** Sessions land in
-  `~/Documents/walk-and-talk/`, deliberately outside `~/archive` and any
-  nightly mirror job that watches it.
+  `~/walk-and-talk/` (macOS: `~/Documents/walk-and-talk/`), deliberately
+  outside `~/archive` and any nightly mirror job that watches it.
 
 `noupstream_test.go` makes these properties of the build rather than promises in
 a comment — it fails if the uploader is imported, if a `net/http` client appears
@@ -253,12 +304,14 @@ warning that `--live` streams narration under a remote backend or that
 `--portal` exposes the output root, if the websocket client is imported
 anywhere but `cdp.go` and `portal.go`, or if the
 output path moves into the archive tree. Every one of those runs against
-`recgo-tab`, `recgo-browser` **and** `recgo-desktop`: they are the same tool
-at three settings, so a promise that holds for one and not the others is the
-worst possible outcome. The failure mode being guarded
+`recgo-tab`, `recgo-browser`, `recgo-desktop` **and** `recgo-window`: they are
+the same tool at four settings, so a promise that holds for one and not the
+others is the worst possible outcome. The failure mode being guarded
 against is silent: nobody notices data leaving.
 
-> **recgo-desktop is the same recorder pointed at the screen.** Same
+> **recgo-desktop is the same recorder pointed at the screen** (and
+> `recgo-window` the same binary, `internal/desktop`, pinned to one screen or
+> window picked on every start -- see the README). Same
 > `--stt-backend auto` local-first default, same live document, same
 > `--portal` / `--sync-target`, same output root, and a dedicated test pins
 > its extra promise: video and screenshots never leave the machine. What
@@ -408,7 +461,7 @@ single self-contained `index.html` next to the session folders — no server, no
 uploads, all references relative:
 
 ```sh
-recgo-sessions                 # $XDG_DOCUMENTS_DIR/walk-and-talk → index.html
+recgo-sessions                 # ~/walk-and-talk → index.html
 recgo-sessions --dir /path     # any sessions root
 ```
 

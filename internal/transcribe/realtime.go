@@ -53,6 +53,9 @@ type Config struct {
 	Endpoint string
 	APIKey   string
 	Model    string
+	// Realtime streams the audio over the endpoint's /v1/realtime websocket
+	// as it is captured, instead of posting a chunk every few seconds.
+	Realtime bool
 
 	LocalBin      string
 	LocalModel    string
@@ -86,6 +89,12 @@ type State struct {
 	PassText        string
 	PassStartSample int
 	PassEndSample   int
+
+	// Speaker is who the STT endpoint heard in PassText: the registry name
+	// when it has one, else the cluster id, empty when nothing matched or
+	// the endpoint does not identify speakers.
+	Speaker      string
+	SpeakerScore float64
 }
 
 type Session struct {
@@ -112,6 +121,7 @@ type Session struct {
 	inflight sync.Mutex
 
 	interval time.Duration
+	rtSent   int
 
 	updates chan State
 	emitMu  sync.Mutex
@@ -147,7 +157,11 @@ func (s *Session) StartFeed() error {
 		return fmt.Errorf("no transcription backend configured -- set [transcription.remote] endpoint in the recgo config, or provide a local whisper model")
 	}
 	s.setupTmpWav()
-	go s.transcribeLoop()
+	if s.cfg.usesRealtime() {
+		go s.realtimeLoop()
+	} else {
+		go s.transcribeLoop()
+	}
 	return nil
 }
 
@@ -208,6 +222,9 @@ func (s *Session) Start() error {
 	s.cmd = cmd
 	s.procDone = make(chan struct{})
 	logging.Log("transcribe: ffmpeg pid=%d mic=%s", cmd.Process.Pid, s.mic)
+	if s.cfg.usesRealtime() {
+		go s.realtimeLoop()
+	}
 
 	stderrDone := make(chan struct{})
 	go func() {
@@ -235,7 +252,9 @@ func (s *Session) Start() error {
 		logging.Log("transcribe: %v", msg)
 		s.emit(State{Err: msg})
 	}()
-	go s.transcribeLoop()
+	if !s.cfg.usesRealtime() {
+		go s.transcribeLoop()
+	}
 	return nil
 }
 

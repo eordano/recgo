@@ -111,7 +111,7 @@ func TestGenerateTitleAgainstLiveEndpoint(t *testing.T) {
 	}
 	res := GenerateTitle(TitleOptions{
 		Enabled: true,
-		APIKey:  firstNonEmpty(os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY")),
+		APIKey:  FirstNonEmpty(os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY")),
 	}, &Transcript{OK: true, Segments: []Segment{
 		{T: 1000, EndT: 3000, Text: "ok so when i click log in here"},
 		{T: 4000, EndT: 7000, Text: "the popup just disappears and nothing happens, no error, nothing"},

@@ -148,6 +148,7 @@ func (p *Pump) trim(now float64) {
 	i := 0
 	for i < len(p.frames) && p.frames[i].T < cutoff {
 		os.Remove(p.frames[i].Path)
+		delete(p.seen, filepath.Base(p.frames[i].Path))
 		i++
 	}
 	p.frames = p.frames[i:]

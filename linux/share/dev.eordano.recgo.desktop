@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Recgo
+GenericName=Session recorder
+Comment=Walk and talk. Everything becomes a document.
+Exec=recgo-app
+Icon=dev.eordano.recgo
+Terminal=false
+Categories=AudioVideo;Recorder;Utility;
+Keywords=record;screen;narration;session;agent;
+StartupNotify=false
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2

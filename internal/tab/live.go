@@ -128,10 +128,12 @@ func (v *LiveView) consume() {
 		case isNoise(e):
 		case e.Kind == "mark":
 			v.printf("%s  Mark: %d", stamp, e.Seq)
+		case e.Kind == "note":
+			v.printf("%s  Note: %s", stamp, oneLine(e.Text))
 		case e.Kind == "navigation":
 			v.printf("%s  Navigate: %s", stamp, e.URL)
 		case e.Kind == "tab-switch":
-			v.printf("%s  Tab: %s", stamp, oneLine(firstNonEmpty(e.Title, e.URL)))
+			v.printf("%s  Tab: %s", stamp, oneLine(FirstNonEmpty(e.Title, e.URL)))
 		case e.Kind == "focus":
 			v.printf("%s  Focus: %s", stamp, oneLine(e.Title))
 		case e.Kind == "window-appear":

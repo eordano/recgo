@@ -2,12 +2,16 @@
 
 The menu-bar shell over the Go recorders, implemented from the
 "Live walk-and-talk demo" design (see ../APP-DESIGN.md for the rationale).
-The app owns no capture code: it spawns `recgo-desktop` / `recgo-browser` /
-`recgo-tab` (Audio only is `recgo-desktop -no-video`; the `recgo` TUI stays
-terminal-only) with the flags the Settings window maps to, writes `m`
-to their stdin for marks, SIGINTs them to stop, tails `SESSION.live.md` for
-the live document, and reads the `wrote <dir>/SESSION.md` stderr line to know
-where the packed session landed.
+The app owns no capture code: it spawns `recgo-desktop` / `recgo-window` /
+`recgo-browser` / `recgo-tab` with the flags the Settings window maps to,
+writes `m` to their stdin for marks, SIGINTs them to stop, tails
+`SESSION.live.md` for the live document, and reads the `wrote <dir>/SESSION.md`
+stderr line to know where the packed session landed. Audio only is `recgo
+<name>` itself, run `-headless`: it asks for the name, and the recording is
+exactly the terminal's (one mkv with mix, system and mic tracks, recgo's own
+config.toml for devices, output folder, watchdog and upload), with recgo's
+`recording ->` / `narration:` / `wrote` lines standing in for the live
+document.
 
 ## Build
 
@@ -35,16 +39,19 @@ and closing the last of them hands it back.
 ## What is implemented
 
 - Menu bar item (red dot + elapsed while recording; the timer can be turned
-  off in Settings) opening a panel-styled popover: Screen / Browser /
-  This Tab… / Audio only, audio track section, Library…, Settings…, and while
-  recording Mark / HUD toggle / live-session toggle / Stop.
+  off in Settings) opening a panel-styled popover: Screen / Window… /
+  Browser / This Tab… / Audio only, audio track section, Library…, Settings…,
+  and while recording Mark / HUD toggle / live-session toggle / Stop.
+- Window… records one display: the popover asks which (a popup over
+  `recgo-window -list-screens`, skipped with a single display) and passes it
+  as `-screen N`; the pick is made fresh every time.
 - Browser and Tab rows disable themselves (and their hotkeys explain) when nothing
   answers CDP on 127.0.0.1:9222, probed with the same /json/list the recorders use.
 - Global hotkeys (Carbon, no Accessibility needed) for start/mark/HUD/stop/
   library — none bound by default; each verb takes a chord like
   `cmd+shift+1` in Settings → Shortcuts, or via
   `defaults write dev.eordano.recgo shortcutRecordScreen cmd+shift+1`
-  (keys: shortcutRecordScreen/Browser/Tab/Audio, shortcutMark,
+  (keys: shortcutRecordScreen/Window/Browser/Tab/Audio, shortcutMark,
   shortcutToggleHUD, shortcutStop, shortcutOpenLibrary).
 - Recording HUD: floating non-activating panel, excluded from capture
   (`sharingType = .none`), with elapsed, level meter, the live narration
@@ -72,5 +79,6 @@ and closing the last of them hands it back.
 - No pause: the CLIs have no pause verb yet.
 - The agent chat column shows portal/room state only; the portal is a
   file-read surface, not a message bus.
-- Audio-only mode drives `recgo`, which has its own config surface: no
-  marks, no live document.
+- Audio-only mode drives `recgo -headless <name>`, which has its own config
+  surface: no marks, no session folder; the live transcript lines it prints
+  are what the HUD shows.

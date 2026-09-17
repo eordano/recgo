@@ -20,7 +20,75 @@ enum Actions {
             }
             return
         }
+        if mode == .window {
+            pickScreen { screen in
+                guard !Recorder.shared.isBusy else { return }
+                Recorder.shared.start(.window, screen: screen)
+            }
+            return
+        }
+        if mode == .audio {
+            // Audio only is `recgo <name>`: the name is the one thing it asks
+            // for, and it is the file's identity wherever the recording lands.
+            let alert = NSAlert()
+            alert.messageText = "Audio only"
+            alert.informativeText = "Recording name (the file is <date>-<name>.mkv, like `recgo <name>`)"
+            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+            field.stringValue = "audio"
+            alert.accessoryView = field
+            alert.addButton(withTitle: "Record")
+            alert.addButton(withTitle: "Cancel")
+            alert.window.initialFirstResponder = field
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            guard !Recorder.shared.isBusy else { return }
+            Recorder.shared.start(.audio, name: field.stringValue)
+            return
+        }
         Recorder.shared.start(mode)
+    }
+
+    // The screens as recgo-window numbers them (`-list-screens`, one
+    // "N<tab>WxH<tab>main" line each); it is the recorder's own list, so
+    // the number handed back as -screen cannot disagree with it.
+    static func listScreens() -> [(number: String, label: String)] {
+        guard let bin = AppSettings.shared.resolveBinary("recgo-window") else { return [] }
+        let p = Process()
+        p.executableURL = bin
+        p.arguments = ["-list-screens"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        do { try p.run() } catch { return [] }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        return text.split(separator: "\n").compactMap { line in
+            let f = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            guard f.count >= 2, !f[0].isEmpty else { return nil }
+            let main = f.count > 2 && f[2] == "main" ? "  (main)" : ""
+            return (number: f[0], label: "Display \(f[0])  \(f[1])\(main)")
+        }
+    }
+
+    // One display auto-picks; several ask, so the pick is made here rather
+    // than on the recorder's stdin, which the app owns for marks.
+    static func pickScreen(_ done: @escaping (String) -> Void) {
+        let screens = listScreens()
+        if screens.count <= 1 {
+            done(screens.first?.number ?? "main")
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Record which screen?"
+        alert.informativeText = "Only that screen is captured. The pick is asked for every time."
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 26), pullsDown: false)
+        for s in screens { popup.addItem(withTitle: s.label) }
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "Record")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        done(screens[max(0, popup.indexOfSelectedItem)].number)
     }
 
     static func stop() { Recorder.shared.stop() }
@@ -223,7 +291,7 @@ struct PopoverView: View {
                             .frame(width: 26, height: 26)
                             .background(
                                 RoundedRectangle(cornerRadius: 8).fill(Theme.control))
-                        Text(mode == .tab ? "This Tab…" : mode.label)
+                        Text(mode == .tab ? "This Tab…" : mode == .window ? "Window…" : mode.label)
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(Theme.text)
                         Spacer()
@@ -412,6 +480,7 @@ struct PopoverView: View {
     private func iconName(_ mode: RecordMode) -> String {
         switch mode {
         case .screen: return "rectangle"
+        case .window: return "display"
         case .browser: return "globe"
         case .tab: return "macwindow"
         case .audio: return "waveform"

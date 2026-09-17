@@ -72,6 +72,9 @@ struct SettingsView: View {
                       isOn: Binding(
                         get: { settings.launchAtLogin },
                         set: { settings.launchAtLogin = $0 }))
+            toggleRow("Ask to record Google Meet calls",
+                      caption: "Prompts after joining in Chromium on debug port 9222.",
+                      isOn: $settings.meetPrompt)
             toggleRow("Show elapsed time in the menu bar",
                       caption: "Some people find a running timer stressful.",
                       isOn: $settings.menuTimer)
@@ -140,11 +143,15 @@ struct SettingsView: View {
                 caption: "Blank uses the system default source.") {
                 AnyView(field($settings.micDevice, placeholder: "default", width: 220))
             }
+            row("Meet system audio device",
+                caption: "Loopback used alongside the microphone for Meet recordings.") {
+                AnyView(field($settings.monitorDevice, placeholder: "BlackHole 2ch", width: 220))
+            }
             banner(
                 title: "System audio needs BlackHole",
-                body: "Every mode records the microphone. To include system audio, "
-                    + "point the device at a BlackHole loopback (or an aggregate "
-                    + "of mic + loopback).",
+                body: "For Meet recordings, select a Multi-Output Device containing your "
+                    + "speakers and BlackHole in macOS Sound settings. Recgo mixes the "
+                    + "loopback with your microphone.",
                 tint: Theme.amber)
         }
     }
@@ -258,6 +265,7 @@ struct SettingsView: View {
                 .font(.system(size: 12)).foregroundStyle(Theme.faint)
                 .padding(.bottom, 12)
             shortcutRow("Record screen", $settings.shortcutRecordScreen)
+            shortcutRow("Record one screen", $settings.shortcutRecordWindow)
             shortcutRow("Record browser", $settings.shortcutRecordBrowser)
             shortcutRow("Record this tab", $settings.shortcutRecordTab)
             shortcutRow("Record audio only", $settings.shortcutRecordAudio)

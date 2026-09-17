@@ -33,6 +33,7 @@ type MicOptions struct {
 	Clock     *Clock
 	OutDir    string
 	Device    string
+	Monitor   string
 	FFmpegBin string
 	Tap       func(pcm []byte)
 }
@@ -40,6 +41,8 @@ type MicOptions struct {
 type Mic struct {
 	opts    MicOptions
 	device  string
+	monitor string
+	vsink   *audio.VirtualSink
 	cmd     *exec.Cmd
 	rawPath string
 	wavPath string
@@ -92,18 +95,20 @@ func StartMic(o MicOptions) (*Mic, error) {
 	m := &Mic{
 		opts:    o,
 		device:  device,
+		monitor: o.Monitor,
 		rawPath: filepath.Join(o.OutDir, "audio.pcm"),
 		wavPath: filepath.Join(o.OutDir, "audio.wav"),
 		done:    make(chan struct{}),
 	}
+	if m.monitor != "" && audio.NeedsVirtualSink(m.monitor) {
+		vs, mon, err := audio.NewVirtualSink(audio.GetSinkNameFromMonitor(m.monitor))
+		if err != nil {
+			return nil, fmt.Errorf("system audio via %s: %w", m.monitor, err)
+		}
+		m.vsink, m.monitor = vs, mon
+	}
 
-	args := append([]string{"-hide_banner", "-loglevel", "warning"}, audio.FFmpegInputArgs(device)...)
-	args = append(args,
-		"-ac", fmt.Sprint(micChannels),
-		"-ar", fmt.Sprint(micRate),
-		"-f", "s16le", "pipe:1")
-
-	m.cmd = exec.Command(o.FFmpegBin, args...)
+	m.cmd = exec.Command(o.FFmpegBin, micFFmpegArgs(device, m.monitor)...)
 	m.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := m.cmd.StdoutPipe()
@@ -115,6 +120,7 @@ func StartMic(o MicOptions) (*Mic, error) {
 		return nil, err
 	}
 	if err := m.cmd.Start(); err != nil {
+		m.vsink.Cleanup()
 		return nil, fmt.Errorf("start ffmpeg: %w", err)
 	}
 
@@ -160,6 +166,33 @@ func StartMic(o MicOptions) (*Mic, error) {
 	return m, nil
 }
 
+func micFFmpegArgs(device, monitor string) []string {
+	args := append([]string{"-hide_banner", "-loglevel", "warning"}, audio.FFmpegInputArgs(device)...)
+	if monitor != "" {
+		args = append(args, audio.FFmpegMonitorInputArgs(monitor)...)
+		args = append(args,
+			"-filter_complex", "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[a]",
+			"-map", "[a]")
+	}
+	return append(args,
+		"-ac", fmt.Sprint(micChannels),
+		"-ar", fmt.Sprint(micRate),
+		"-f", "s16le", "pipe:1")
+}
+
+// Monitor is the source system audio is mixed in from, empty when only the
+// microphone is captured.
+func (m *Mic) Monitor() string { return m.monitor }
+
+// SetSystemAudio mutes or unmutes the monitor capture stream in place, so
+// the mix keeps running on one clock while what you hear drops out of it.
+func (m *Mic) SetSystemAudio(on bool) error {
+	if m.monitor == "" {
+		return fmt.Errorf("system audio was not captured at start (-system-audio)")
+	}
+	return audio.SetStreamMuted(audio.SystemAudioStream, m.cmd.Process.Pid, !on)
+}
+
 func (m *Mic) EmitCalibrationTone(cdp *CDP, clock *Clock) error {
 	var res struct {
 		Result struct {
@@ -203,6 +236,7 @@ func (m *Mic) Stop() MicResult {
 		<-m.done
 	}
 	m.cmd.Wait()
+	m.vsink.Cleanup()
 
 	m.mu.Lock()
 	n := m.bytes

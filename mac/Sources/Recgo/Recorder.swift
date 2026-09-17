@@ -31,6 +31,13 @@ final class Recorder: ObservableObject {
     // explicit room (the name is the only credential), so when the setting
     // is blank the app mints an unguessable one per session.
     @Published var activeRoom = ""
+    // Window mode: what recgo-window says it is capturing ("display 2,
+    // 2560x1440"), from its `capturing ...` stderr line.
+    @Published var source = ""
+    // Audio only: the <name> handed to `recgo <name>`, and the file it
+    // announced with its `recording -> PATH` line.
+    @Published var name = ""
+    @Published var recordingPath = ""
 
     var onFinished: ((URL?) -> Void)?
     var onStarted: (() -> Void)?
@@ -46,31 +53,59 @@ final class Recorder: ObservableObject {
     var isRecording: Bool { phase == .recording }
     var isBusy: Bool { phase != .idle }
 
-    func start(_ mode: RecordMode) {
+    // screen is the -screen value for window mode: a number from
+    // `recgo-window -list-screens`, or "main".
+    func start(_ mode: RecordMode, screen: String? = nil, meeting: Bool = false, name: String = "") {
         guard phase == .idle else { return }
         self.mode = mode
+        self.name = Recorder.recordingName(name, meeting: meeting)
         lastError = ""
         finishedSessionDir = nil
-        spawn(mode)
+        spawn(mode, screen: screen, meeting: meeting)
     }
 
-    private func buildArguments(_ mode: RecordMode) -> [String] {
+    // The <name> as recgo's own filenames come out: what the person typed,
+    // cleaned, else meet / audio.
+    static func recordingName(_ raw: String, meeting: Bool) -> String {
+        let cleaned = raw.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "[^A-Za-z0-9._-]+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-."))
+        if cleaned.isEmpty { return meeting ? "meet" : "audio" }
+        return cleaned
+    }
+
+    private func buildArguments(_ mode: RecordMode, screen: String? = nil, meeting: Bool = false) -> [String] {
         let s = AppSettings.shared
-        var args: [String] = ["-out", s.outRootURL.path]
         if mode == .audio {
-            // The mic is the whole recording here; the capture-mic toggle
-            // only applies to the modes where it is an add-on.
-            args.append("-no-video")
-        } else if !s.captureMic {
+            // `recgo <name>` as typed in a terminal: devices, output folder,
+            // max duration and upload come from recgo's own config.toml; the
+            // app only pins a device it was told to and keeps Never upload.
+            var a: [String] = ["-headless"]
+            if !s.micDevice.isEmpty { a += ["-mic", s.micDevice] }
+            if !s.monitorDevice.isEmpty { a += ["-system-audio", s.monitorDevice] }
+            if !s.neverUpload && s.sttBackend != "none" { a.append("-transcribe") }
+            if s.neverUpload { a.append("-no-upload") }
+            a.append(name.isEmpty ? "audio" : name)
+            return a
+        }
+        var args: [String] = ["-out", s.outRootURL.path]
+        if mode == .window, let screen, !screen.isEmpty {
+            args += ["-screen", screen]
+        }
+        if !s.captureMic {
             args.append("-no-audio")
         }
         if !s.micDevice.isEmpty { args += ["-mic", s.micDevice] }
+        if meeting {
+            args += ["-system-audio", s.monitorDevice.isEmpty ? "BlackHole 2ch" : s.monitorDevice,
+                     "-require-system-audio"]
+        }
         args += ["-stt-backend", s.effectiveSTTBackend]
         if !s.sttLanguage.isEmpty { args += ["-stt-language", s.sttLanguage] }
         if !s.whisperModel.isEmpty { args += ["-whisper-model", s.whisperModel] }
         if !s.whisperBin.isEmpty { args += ["-whisper-bin", s.whisperBin] }
         if !s.autoTitle { args += ["-title-backend", "none"] }
-        if mode == .screen {
+        if mode == .screen || mode == .window {
             args.append("-click-shots=\(s.clickShots)")
             args.append("-focus-shots=\(s.focusShots)")
         }
@@ -101,7 +136,7 @@ final class Recorder: ObservableObject {
         return "\(a.randomElement()!)-\(b.randomElement()!)-\(String(suffix))"
     }
 
-    private func spawn(_ mode: RecordMode) {
+    private func spawn(_ mode: RecordMode, screen: String? = nil, meeting: Bool = false) {
         guard let bin = AppSettings.shared.resolveBinary(mode.binary) else {
             phase = .idle
             lastError = "\(mode.binary) not found — set the binaries folder in Settings"
@@ -111,7 +146,7 @@ final class Recorder: ObservableObject {
 
         let p = Process()
         p.executableURL = bin
-        p.arguments = buildArguments(mode)
+        p.arguments = buildArguments(mode, screen: screen, meeting: meeting)
         p.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
 
         // A login-launched app gets a bare PATH; the recorders shell out to
@@ -162,6 +197,8 @@ final class Recorder: ObservableObject {
         marks = 0
         liveDoc = SessionDoc()
         lastNarration = ""
+        source = ""
+        recordingPath = ""
         liveDirURL = nil
         phase = .recording
         onStarted?()
@@ -184,6 +221,7 @@ final class Recorder: ObservableObject {
         }
         guard phase == .recording else { return }
         elapsed = Date().timeIntervalSince(start)
+        if mode == .audio { return }
         if liveDirURL == nil, let pid = process?.processIdentifier {
             let root = AppSettings.shared.outRootURL
             let suffix = "-recording-\(pid)"
@@ -206,6 +244,20 @@ final class Recorder: ObservableObject {
     private func consumeStderr(_ text: String) {
         for line in text.split(separator: "\n") {
             stderrTail.append(String(line))
+            if phase == .recording, line.hasPrefix("capturing ") {
+                source = String(line.dropFirst("capturing ".count))
+                    .trimmingCharacters(in: .whitespaces)
+            }
+            // recgo -headless: the file it records to, and each utterance
+            // of its live transcript, since there is no SESSION.live.md.
+            if phase == .recording, mode == .audio, line.hasPrefix("recording -> ") {
+                recordingPath = String(line.dropFirst("recording -> ".count))
+                    .trimmingCharacters(in: .whitespaces)
+                source = (recordingPath as NSString).lastPathComponent
+            }
+            if phase == .recording, mode == .audio, let r = line.range(of: "  narration: ") {
+                lastNarration = String(line[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+            }
         }
         if stderrTail.count > 60 { stderrTail.removeFirst(stderrTail.count - 60) }
         if phase == .finishing,
@@ -249,10 +301,15 @@ final class Recorder: ObservableObject {
     private func processEnded(status: Int32) {
         tick?.invalidate()
         tick = nil
-        let wrote = stderrTail.last { $0.hasPrefix("wrote ") && $0.hasSuffix("/SESSION.md") }
+        // "wrote <dir>/SESSION.md" from the session recorders; recgo itself
+        // ends on "wrote <file>.mkv" (Audio only), which is then the result.
+        let wrote = stderrTail.last { $0.hasPrefix("wrote ") }
         var dir: URL?
         if let wrote {
-            let path = String(wrote.dropFirst(6).dropLast("/SESSION.md".count))
+            var path = String(wrote.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            if path.hasSuffix("/SESSION.md") {
+                path = String(path.dropLast("/SESSION.md".count))
+            }
             dir = URL(fileURLWithPath: path)
         }
         if dir == nil && status != 0 {

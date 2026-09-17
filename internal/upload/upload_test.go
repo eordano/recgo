@@ -40,3 +40,19 @@ func TestSyncDirRejectsAMissingSession(t *testing.T) {
 		t.Error("expected an error for a session directory that is not there")
 	}
 }
+
+func TestLocalMirrorIsTheDestinationPathWhenMountedHere(t *testing.T) {
+	root := t.TempDir()
+	if got := LocalMirror("user@host:" + root); got != root {
+		t.Errorf("LocalMirror(mounted dir) = %q, want %q", got, root)
+	}
+	for _, dest := range []string{
+		"user@host:" + root + "/missing",
+		"host:relative/path",
+		root,
+	} {
+		if got := LocalMirror(dest); got != "" {
+			t.Errorf("LocalMirror(%q) = %q, want empty", dest, got)
+		}
+	}
+}

@@ -37,6 +37,12 @@ func KWinAvailable(conn *dbus.Conn) bool {
 }
 
 func KWinShot(conn *dbus.Conn, method string, includeCursor bool, timeout time.Duration) (image.Image, error) {
+	return KWinShotArgs(conn, method, nil, includeCursor, timeout)
+}
+
+// KWinShotArgs is KWinShot for the methods that take a target before the
+// options, such as CaptureScreen(name) or CaptureWindow(handle).
+func KWinShotArgs(conn *dbus.Conn, method string, args []any, includeCursor bool, timeout time.Duration) (image.Image, error) {
 	if timeout == 0 {
 		timeout = 10 * time.Second
 	}
@@ -63,8 +69,8 @@ func KWinShot(conn *dbus.Conn, method string, includeCursor bool, timeout time.D
 	}
 
 	var results map[string]dbus.Variant
-	call := conn.Object(kwinBus, kwinPath).Call(
-		kwinIface+"."+method, 0, opts, dbus.UnixFD(w.Fd()))
+	callArgs := append(append([]any{}, args...), opts, dbus.UnixFD(w.Fd()))
+	call := conn.Object(kwinBus, kwinPath).Call(kwinIface+"."+method, 0, callArgs...)
 	w.Close()
 
 	if err := call.Store(&results); err != nil {

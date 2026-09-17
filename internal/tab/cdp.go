@@ -110,6 +110,26 @@ func Attach(port int, match string) (*CDP, *Target, error) {
 	return c, chosen, nil
 }
 
+// AttachTarget dials one page by its CDP target id, the exact handle a
+// picker got from /json/list, where a URL substring could hit a sibling tab.
+func AttachTarget(port int, id string) (*CDP, *Target, error) {
+	targets, err := ListTargets(port)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := range targets {
+		t := &targets[i]
+		if t.ID == id && t.Type == "page" && t.WebSocketDebuggerURL != "" {
+			c, err := Dial(t.WebSocketDebuggerURL)
+			if err != nil {
+				return nil, nil, err
+			}
+			return c, t, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("no page target with id %q on port %d (was the tab closed?)", id, port)
+}
+
 func Dial(wsURL string) (*CDP, error) {
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,

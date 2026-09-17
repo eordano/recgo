@@ -50,6 +50,9 @@ func DefaultChromium() string {
 // ~/Documents is iCloud-synced (Desktop & Documents sync), sessions would be
 // uploaded to Apple, so fall back to ~/walk-and-talk instead.
 func DefaultOutRoot() string {
+	if dir := ConfiguredOutRoot(); dir != "" {
+		return dir
+	}
 	docs := DocumentsDir()
 	home, _ := os.UserHomeDir()
 	if home != "" && icloudSynced(home, docs) {

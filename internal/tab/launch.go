@@ -32,6 +32,13 @@ func LaunchChromium(o LaunchOptions) (*exec.Cmd, string, error) {
 	if profile == "" {
 		profile = filepath.Join(os.TempDir(), fmt.Sprintf("recgo-profile-%d", os.Getpid()))
 	}
+	// A browser already answering on the port would win the attach that
+	// follows: the session would record -- and navigate -- one of its tabs
+	// instead of the throwaway instance launched here.
+	if _, err := ListTargets(o.Port); err == nil {
+		return nil, profile, fmt.Errorf("port %d already has a browser listening; --launch/--headless "+
+			"need a free port (pass --port, or drop --launch to attach to that browser)", o.Port)
+	}
 
 	args := []string{
 		fmt.Sprintf("--remote-debugging-port=%d", o.Port),

@@ -28,6 +28,14 @@ func GetDefaultSource() (string, error) {
 
 func GetDefaultSink() (string, error) { return "", nil }
 
+func DefaultMonitor() (string, error) {
+	return "", fmt.Errorf("no default monitor on macOS -- name the loopback device (BlackHole)")
+}
+
+func SetStreamMuted(streamName string, pid int, muted bool) error {
+	return fmt.Errorf("live system-audio toggle needs PulseAudio or PipeWire")
+}
+
 func defaultInputName() string {
 	name, err := runTool("SwitchAudioSource", "-c", "-t", "input")
 	if err != nil {

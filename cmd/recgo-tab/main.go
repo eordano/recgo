@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -9,7 +8,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -35,26 +33,29 @@ func pickTab(port int) (*tab.TabInfo, error) {
 }
 
 type options struct {
-	launch      string
-	chromium    string
-	headless    bool
-	port        int
-	match       string
-	out         string
-	duration    time.Duration
-	noAudio     bool
-	micDevice   string
-	ffmpegBin   string
-	sttBackend  string
-	sttURL      string
-	sttModel    string
-	sttKey      string
-	sttLanguage string
-	noVAD       bool
-	keepRaw     bool
-	pick        bool
-	json        bool
-	live        bool
+	launch       string
+	chromium     string
+	headless     bool
+	port         int
+	match        string
+	target       string
+	systemAudio  string
+	out          string
+	duration     time.Duration
+	noAudio      bool
+	micDevice    string
+	ffmpegBin    string
+	sttBackend   string
+	liveRealtime bool
+	sttURL       string
+	sttModel     string
+	sttKey       string
+	sttLanguage  string
+	noVAD        bool
+	keepRaw      bool
+	pick         bool
+	json         bool
+	live         bool
 
 	titleBackend string
 	titleURL     string
@@ -77,13 +78,7 @@ type options struct {
 }
 
 func (o options) sttEndpoints() []tab.Endpoint {
-	if o.sttURL != "" {
-		return []tab.Endpoint{{URL: o.sttURL, Model: firstNonEmpty(o.sttModel, "whisper")}}
-	}
-	if o.cfgURL != "" {
-		return []tab.Endpoint{{URL: o.cfgURL, Model: firstNonEmpty(o.cfgModel, "whisper")}}
-	}
-	return tab.DefaultEndpoints
+	return tab.Endpoints(o.sttURL, o.sttModel, o.cfgURL, o.cfgModel)
 }
 
 func main() {
@@ -93,13 +88,18 @@ func main() {
 	flag.BoolVar(&o.headless, "headless", false, "launch headless (implies --launch)")
 	flag.IntVar(&o.port, "port", 9222, "CDP port")
 	flag.StringVar(&o.match, "match", "", "attach to the tab whose URL/title contains this")
-	flag.StringVar(&o.out, "out", "", "output root (default $XDG_DOCUMENTS_DIR/walk-and-talk)")
+	flag.StringVar(&o.target, "target", "", "attach to the tab with this CDP target id (exact; from /json/list)")
+	flag.StringVar(&o.out, "out", "", "output root (default: [recording] output_dir in config.toml, else ~/walk-and-talk; ~/Documents/walk-and-talk on macOS)")
 	flag.DurationVar(&o.duration, "duration", 0, "stop automatically after this long; otherwise Ctrl-C")
 	flag.BoolVar(&o.noAudio, "no-audio", false, "skip microphone capture")
 	flag.StringVar(&o.micDevice, "mic", "", "capture device (default: system default source)")
+	flag.StringVar(&o.systemAudio, "system-audio", "",
+		"mix what you hear into the narration track: a monitor source (<sink>.monitor, or a "+
+			"loopback device on macOS), or 'default' for the default output; 'sysaudio off' / "+
+			"'sysaudio on' on stdin mutes and unmutes it while recording")
 	flag.StringVar(&o.ffmpegBin, "ffmpeg", "ffmpeg", "ffmpeg binary")
 	flag.StringVar(&o.sttBackend, "stt-backend", "auto",
-		"auto (local if a whisper model is found, else remote) | local (whisper.cpp, nothing leaves this machine) | remote (uploads audio) | none")
+		"auto (local if a whisper model is found, else remote) | local (whisper.cpp, nothing leaves this machine) | remote (uploads audio) | realtime (uploads audio; streams narration over the endpoint's /v1/realtime websocket as you speak, final transcript via the batch endpoint) | none")
 	flag.StringVar(&o.whisperBin, "whisper-bin", "whisper-cli", "whisper.cpp CLI")
 	flag.StringVar(&o.whisperModel, "whisper-model", "", "ggml model (default: discovered, see below)")
 	flag.StringVar(&o.whisperVADModel, "whisper-vad-model", "", "silero VAD model (default: discovered)")
@@ -181,6 +181,10 @@ func main() {
 }
 
 func run(o options) error {
+	if o.sttBackend == "realtime" {
+		o.liveRealtime = true
+		o.sttBackend = "remote"
+	}
 	if o.sttBackend == "auto" {
 		if m, _ := tab.DiscoverWhisperModel(); m != "" || o.whisperModel != "" {
 			o.sttBackend = "local"
@@ -239,12 +243,26 @@ func run(o options) error {
 		o.match = chosen.URL
 	}
 
-	cdp, target, err := tab.Attach(o.port, o.match)
+	var cdp *tab.CDP
+	var target *tab.Target
+	var err error
+	if o.target != "" {
+		cdp, target, err = tab.AttachTarget(o.port, o.target)
+	} else {
+		cdp, target, err = tab.Attach(o.port, o.match)
+	}
 	if err != nil {
 		return err
 	}
 	defer cdp.Close()
-	fmt.Fprintf(os.Stderr, "attached to: %s\n", firstNonEmpty(target.Title, target.URL))
+	fmt.Fprintf(os.Stderr, "attached to: %s\n", tab.FirstNonEmpty(target.Title, target.URL))
+	fmt.Fprintf(os.Stderr, "tab: %s %s\n", target.ID, target.URL)
+
+	monitor, err := tab.ResolveMonitor(o.systemAudio)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "system audio: %v -- recording the microphone alone\n", err)
+		monitor = ""
+	}
 
 	clock := tab.NewClock()
 	rec := tab.NewRecorder(cdp, clock, provisional)
@@ -255,8 +273,14 @@ func run(o options) error {
 		switch o.sttBackend {
 		case "remote":
 			if eps := o.sttEndpoints(); len(eps) > 0 {
-				key := firstNonEmpty(o.sttKey, os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY"), o.cfgKey)
-				feed = tab.RemoteLiveFeed(context.Background(), eps[0], key, o.sttModel)
+				key := tab.APIKey(o.sttKey, o.cfgKey)
+				if o.liveRealtime {
+					feed = tab.RealtimeLiveFeed(context.Background(), eps[0], key, o.sttModel)
+					fmt.Fprintf(os.Stderr, "live: streaming narration to %s over its realtime websocket as it is spoken "+
+						"-- the final transcript is still redone from the full recording (--live=false to disable)\n", eps[0].URL)
+				} else {
+					feed = tab.RemoteLiveFeed(context.Background(), eps[0], key, o.sttModel)
+				}
 				fmt.Fprintf(os.Stderr, "live: streaming narration to %s as it is spoken -- the final "+
 					"transcript is still redone from the full recording (--live=false to disable)\n", eps[0].URL)
 			} else {
@@ -284,6 +308,7 @@ func run(o options) error {
 			Clock:     clock,
 			OutDir:    provisional,
 			Device:    o.micDevice,
+			Monitor:   monitor,
 			FFmpegBin: o.ffmpegBin,
 			Tap:       tapFn,
 		})
@@ -291,6 +316,8 @@ func run(o options) error {
 			fmt.Fprintf(os.Stderr, "audio: %v\n", err)
 			mic = nil
 			feed = nil
+		} else if mic.Monitor() != "" {
+			fmt.Fprintf(os.Stderr, "audio: system audio mixed in from %s\n", mic.Monitor())
 		}
 	}
 
@@ -322,21 +349,23 @@ func run(o options) error {
 	if o.live {
 		header := fmt.Sprintf("# Session (recording — replaced by SESSION.md at stop)\n\n"+
 			"Start: %s\nPage: %s\n\n", started.Format("2006-01-02 15:04:05"),
-			firstNonEmpty(o.launch, target.URL))
+			tab.FirstNonEmpty(o.launch, target.URL))
 		lv = tab.StartLiveView(rec.Recording(), os.Stderr, header)
 		if feed != nil {
 			if err := feed.StartFeed(); err != nil {
 				fmt.Fprintf(os.Stderr, "live narration: %v\n", err)
 				feed = nil
 			} else {
-				tab.ConsumeLive(feed, clock, lv.Utterance, func(err error) {
+				tab.ConsumeLiveWith(feed, clock, lv.Utterance, func(text string) {
+					fmt.Fprintf(os.Stderr, "%s  hearing: %s\n", tab.FormatClock(clock.Now()), text)
+				}, func(err error) {
 					fmt.Fprintf(os.Stderr, "live narration: %v\n", err)
 				})
 			}
 		}
 	}
 
-	go readMarks(rec)
+	go tab.ReadCommands(os.Stdin, mic, func() float64 { return rec.Mark("") }, rec.Note)
 	waitForStop(o.duration)
 
 	fmt.Fprintln(os.Stderr, "stopping...")
@@ -379,9 +408,8 @@ func run(o options) error {
 	if named.Note != "" {
 		fmt.Fprintf(os.Stderr, "title: %s\n", named.Note)
 	}
-	finalDir := filepath.Join(root, fmt.Sprintf("%s-%s", stamp, named.Slug))
-	os.RemoveAll(finalDir)
-	if err := os.Rename(provisional, finalDir); err != nil {
+	finalDir, err := tab.FinalizeDir(provisional, filepath.Join(root, fmt.Sprintf("%s-%s", stamp, named.Slug)))
+	if err != nil {
 		return err
 	}
 
@@ -393,10 +421,11 @@ func run(o options) error {
 		StartedWall: started.Format("2006-01-02 15:04:05"),
 		DurationMs:  durationMs,
 		Cwd:         cwd,
-		TargetURL:   firstNonEmpty(o.launch, target.URL),
+		TargetURL:   tab.FirstNonEmpty(o.launch, target.URL),
 		TargetTitle: target.Title,
 		Tool:        "recgo-tab",
 		AudioNote:   audioNote,
+		SystemAudio: systemAudioOf(mic),
 		TitleNote:   named.Note,
 		System:      tab.CollectSystemInfo(),
 	}, tab.PackOptions{JSON: o.json})
@@ -433,6 +462,9 @@ func syncSession(o options, dir string) {
 	}
 	if dest != "" {
 		fmt.Fprintf(os.Stderr, "  synced -> %s\n", upload.Display(dest))
+		if local := upload.LocalMirror(dest); local != "" {
+			fmt.Fprintf(os.Stderr, "  shared -> %s\n", local)
+		}
 	}
 }
 
@@ -451,7 +483,7 @@ func titleFor(o options, transcript *tab.Transcript, events []tab.Event) tab.Tit
 	} else if o.cfgURL != "" {
 		eps = []tab.Endpoint{{URL: o.cfgURL}}
 	}
-	key := firstNonEmpty(o.sttKey, os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY"), o.cfgKey)
+	key := tab.APIKey(o.sttKey, o.cfgKey)
 	return tab.GenerateTitle(tab.TitleOptions{
 		Enabled: true, Endpoints: eps, Model: o.titleModel, APIKey: key,
 	}, transcript, events)
@@ -486,7 +518,7 @@ func transcribeWav(o options, clock *tab.Clock, wavPath string) *tab.Transcript 
 	}
 	fmt.Fprintf(os.Stderr, "stt: --stt-backend remote — uploading %s to %s\n", wavPath, eps[0].URL)
 
-	key := firstNonEmpty(o.sttKey, os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY"), o.cfgKey)
+	key := tab.APIKey(o.sttKey, o.cfgKey)
 
 	t := tab.TranscribeFallback(clock, wavPath, tab.STTOptions{
 		Endpoints: eps, Model: o.sttModel, APIKey: key, Language: o.sttLanguage,
@@ -506,13 +538,11 @@ func transcribeWav(o options, clock *tab.Clock, wavPath string) *tab.Transcript 
 	return &t
 }
 
-func readMarks(rec *tab.Recorder) {
-	sc := bufio.NewScanner(os.Stdin)
-	for sc.Scan() {
-		if line := strings.TrimSpace(sc.Text()); line == "mark" || line == "m" {
-			fmt.Fprintf(os.Stderr, "marked at %.1fs\n", rec.Mark("")/1000)
-		}
+func systemAudioOf(mic *tab.Mic) string {
+	if mic == nil {
+		return ""
 	}
+	return mic.Monitor()
 }
 
 func waitForStop(d time.Duration) {
@@ -533,15 +563,6 @@ func launchChromium(o options) (*exec.Cmd, string, error) {
 		Chromium: o.chromium, Port: o.port, Headless: o.headless,
 		Profile: filepath.Join(os.TempDir(), fmt.Sprintf("recgo-tab-profile-%d", os.Getpid())),
 	})
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 var _ = audio.CheckBackend

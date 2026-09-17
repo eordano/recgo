@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -9,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -22,27 +20,29 @@ import (
 )
 
 type options struct {
-	launch      string
-	chromium    string
-	headless    bool
-	port        int
-	match       string
-	out         string
-	duration    time.Duration
-	noAudio     bool
-	micDevice   string
-	ffmpegBin   string
-	sttBackend  string
-	sttURL      string
-	sttModel    string
-	sttKey      string
-	sttLanguage string
-	noVAD       bool
-	keepRaw     bool
-	pick        bool
-	json        bool
-	live        bool
-	plain       bool
+	launch       string
+	chromium     string
+	headless     bool
+	port         int
+	match        string
+	out          string
+	duration     time.Duration
+	noAudio      bool
+	micDevice    string
+	systemAudio  string
+	ffmpegBin    string
+	sttBackend   string
+	liveRealtime bool
+	sttURL       string
+	sttModel     string
+	sttKey       string
+	sttLanguage  string
+	noVAD        bool
+	keepRaw      bool
+	pick         bool
+	json         bool
+	live         bool
+	plain        bool
 
 	titleBackend string
 	titleURL     string
@@ -65,13 +65,7 @@ type options struct {
 }
 
 func (o options) sttEndpoints() []tab.Endpoint {
-	if o.sttURL != "" {
-		return []tab.Endpoint{{URL: o.sttURL, Model: firstNonEmpty(o.sttModel, "whisper")}}
-	}
-	if o.cfgURL != "" {
-		return []tab.Endpoint{{URL: o.cfgURL, Model: firstNonEmpty(o.cfgModel, "whisper")}}
-	}
-	return tab.DefaultEndpoints
+	return tab.Endpoints(o.sttURL, o.sttModel, o.cfgURL, o.cfgModel)
 }
 
 // single reports whether the recording is pinned to one tab instead of
@@ -87,13 +81,17 @@ func main() {
 	flag.StringVar(&o.match, "match", "",
 		"record only the tab whose URL/title contains this, instead of following the browser; "+
 			"with --launch there is only the launched tab, so any value pins to it")
-	flag.StringVar(&o.out, "out", "", "output root (default $XDG_DOCUMENTS_DIR/walk-and-talk)")
+	flag.StringVar(&o.out, "out", "", "output root (default: [recording] output_dir in config.toml, else ~/walk-and-talk; ~/Documents/walk-and-talk on macOS)")
 	flag.DurationVar(&o.duration, "duration", 0, "stop automatically after this long; otherwise Ctrl-C")
 	flag.BoolVar(&o.noAudio, "no-audio", false, "skip microphone capture")
 	flag.StringVar(&o.micDevice, "mic", "", "capture device (default: system default source)")
+	flag.StringVar(&o.systemAudio, "system-audio", "",
+		"mix what you hear into the narration track: a monitor source (<sink>.monitor, or a "+
+			"loopback device on macOS), or 'default' for the default output; 'sysaudio off' / "+
+			"'sysaudio on' on stdin mutes and unmutes it while recording")
 	flag.StringVar(&o.ffmpegBin, "ffmpeg", "ffmpeg", "ffmpeg binary")
 	flag.StringVar(&o.sttBackend, "stt-backend", "auto",
-		"auto (local if a whisper model is found, else remote) | local (whisper.cpp, nothing leaves this machine) | remote (uploads audio) | none")
+		"auto (local if a whisper model is found, else remote) | local (whisper.cpp, nothing leaves this machine) | remote (uploads audio) | realtime (uploads audio; streams narration over the endpoint's /v1/realtime websocket as you speak, final transcript via the batch endpoint) | none")
 	flag.StringVar(&o.whisperBin, "whisper-bin", "whisper-cli", "whisper.cpp CLI")
 	flag.StringVar(&o.whisperModel, "whisper-model", "", "ggml model (default: discovered, see below)")
 	flag.StringVar(&o.whisperVADModel, "whisper-vad-model", "", "silero VAD model (default: discovered)")
@@ -193,6 +191,10 @@ func pickTab(port int) (*tab.TabInfo, error) {
 }
 
 func run(o options) error {
+	if o.sttBackend == "realtime" {
+		o.liveRealtime = true
+		o.sttBackend = "remote"
+	}
 	if o.sttBackend == "auto" {
 		if m, _ := tab.DiscoverWhisperModel(); m != "" || o.whisperModel != "" {
 			o.sttBackend = "local"
@@ -266,15 +268,20 @@ func run(o options) error {
 
 	var mic *tab.Mic
 	if !o.noAudio {
-		var err error
+		monitor, err := tab.ResolveMonitor(o.systemAudio)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "system audio: %v -- recording the microphone alone\n", err)
+		}
 		mic, err = tab.StartMic(tab.MicOptions{
-			Clock: clock, OutDir: provisional, Device: o.micDevice, FFmpegBin: o.ffmpegBin,
-			Tap: tapFn,
+			Clock: clock, OutDir: provisional, Device: o.micDevice, Monitor: monitor,
+			FFmpegBin: o.ffmpegBin, Tap: tapFn,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "audio: %v\n", err)
 			mic = nil
 			feed = nil
+		} else if mic.Monitor() != "" {
+			fmt.Fprintf(os.Stderr, "audio: system audio mixed in from %s\n", mic.Monitor())
 		}
 	}
 
@@ -285,7 +292,7 @@ func run(o options) error {
 		// With --launch the pinned tab is still on about:blank at this
 		// point; naming it that would be true and useless.
 		fmt.Fprintf(os.Stderr, "recording one tab: %s\n",
-			firstNonEmpty(o.launch, pinnedTitle, pinnedURL))
+			tab.FirstNonEmpty(o.launch, pinnedTitle, pinnedURL))
 	} else {
 		fmt.Fprintf(os.Stderr, "following %d tab(s) on port %d — new tabs are picked up as they open\n",
 			follower.Count(), o.port)
@@ -308,7 +315,7 @@ func run(o options) error {
 	// Both it and the narration feed exist only under --live.
 	var lv *tab.LiveView
 	if o.live {
-		page := firstNonEmpty(o.launch, pinnedURL)
+		page := tab.FirstNonEmpty(o.launch, pinnedURL)
 		if page == "" {
 			page = fmt.Sprintf("(%d tab(s) on port %d)", follower.Count(), o.port)
 		}
@@ -328,7 +335,7 @@ func run(o options) error {
 	}
 
 	if o.plain {
-		go readMarks(follower)
+		go tab.ReadCommands(os.Stdin, mic, func() float64 { return follower.Mark("") }, follower.Note)
 		runPlain(follower, feed, lv, clock, o.duration)
 	} else if err := runTUI(follower, rec, feed, lv, clock, o.port); err != nil {
 		return err
@@ -374,13 +381,12 @@ func run(o options) error {
 	if named.Note != "" {
 		fmt.Fprintf(os.Stderr, "title: %s\n", named.Note)
 	}
-	finalDir := filepath.Join(root, fmt.Sprintf("%s-%s", stamp, named.Slug))
-	os.RemoveAll(finalDir)
-	if err := os.Rename(provisional, finalDir); err != nil {
+	finalDir, err := tab.FinalizeDir(provisional, filepath.Join(root, fmt.Sprintf("%s-%s", stamp, named.Slug)))
+	if err != nil {
 		return err
 	}
 
-	targetURL := firstNonEmpty(o.launch, pinnedURL)
+	targetURL := tab.FirstNonEmpty(o.launch, pinnedURL)
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("(%d tabs on port %d)", countTabs(events), o.port)
 	}
@@ -397,6 +403,7 @@ func run(o options) error {
 		TargetTitle: pinnedTitle,
 		Tool:        "recgo-browser",
 		AudioNote:   audioNote,
+		SystemAudio: systemAudioOf(mic),
 		TitleNote:   named.Note,
 		System:      tab.CollectSystemInfo(),
 	}, tab.PackOptions{JSON: o.json})
@@ -449,8 +456,14 @@ func (o options) liveFeed() (*transcribe.Session, func([]byte)) {
 				"(set --stt-url, or [transcription.remote] endpoint in the recgo config)")
 			return nil, nil
 		}
-		key := firstNonEmpty(o.sttKey, os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY"), o.cfgKey)
-		feed = tab.RemoteLiveFeed(context.Background(), eps[0], key, o.sttModel)
+		key := tab.APIKey(o.sttKey, o.cfgKey)
+		if o.liveRealtime {
+			feed = tab.RealtimeLiveFeed(context.Background(), eps[0], key, o.sttModel)
+			fmt.Fprintf(os.Stderr, "live: streaming narration to %s over its realtime websocket as it is spoken "+
+				"-- the final transcript is still redone from the full recording (--live=false to disable)\n", eps[0].URL)
+		} else {
+			feed = tab.RemoteLiveFeed(context.Background(), eps[0], key, o.sttModel)
+		}
 		fmt.Fprintf(os.Stderr, "live: streaming narration to %s as it is spoken -- the final "+
 			"transcript is still redone from the full recording (--live=false to disable)\n", eps[0].URL)
 	case "local":
@@ -490,16 +503,10 @@ func syncSession(o options, dir string) {
 	}
 	if dest != "" {
 		fmt.Fprintf(os.Stderr, "  synced -> %s\n", upload.Display(dest))
-	}
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
+		if local := upload.LocalMirror(dest); local != "" {
+			fmt.Fprintf(os.Stderr, "  shared -> %s\n", local)
 		}
 	}
-	return ""
 }
 
 func titleFor(o options, transcript *tab.Transcript, events []tab.Event) tab.TitleResult {
@@ -517,7 +524,7 @@ func titleFor(o options, transcript *tab.Transcript, events []tab.Event) tab.Tit
 	} else if o.cfgURL != "" {
 		eps = []tab.Endpoint{{URL: o.cfgURL}}
 	}
-	key := firstNonEmpty(o.sttKey, os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY"), o.cfgKey)
+	key := tab.APIKey(o.sttKey, o.cfgKey)
 	return tab.GenerateTitle(tab.TitleOptions{
 		Enabled: true, Endpoints: eps, Model: o.titleModel, APIKey: key,
 	}, transcript, events)
@@ -552,7 +559,7 @@ func transcribeWav(o options, clock *tab.Clock, wavPath string) *tab.Transcript 
 	}
 	fmt.Fprintf(os.Stderr, "stt: --stt-backend remote — uploading %s to %s\n", wavPath, eps[0].URL)
 
-	key := firstNonEmpty(o.sttKey, os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY"), o.cfgKey)
+	key := tab.APIKey(o.sttKey, o.cfgKey)
 
 	t := tab.TranscribeFallback(clock, wavPath, tab.STTOptions{
 		Endpoints: eps, Model: o.sttModel, APIKey: key, Language: o.sttLanguage,
@@ -609,18 +616,18 @@ func runPlain(f *tab.Follower, feed *transcribe.Session, lv *tab.LiveView,
 		// lv is non-nil whenever feed is, and under --plain it is the thing
 		// printing to stderr, so narration goes through it rather than being
 		// printed twice in two shapes.
-		tab.ConsumeLive(feed, clock, lv.Utterance, func(err error) {
+		tab.ConsumeLiveWith(feed, clock, lv.Utterance, func(text string) {
+			fmt.Fprintf(os.Stderr, "%s  hearing: %s\n", tab.FormatClock(clock.Now()), text)
+		}, func(err error) {
 			fmt.Fprintf(os.Stderr, "live narration: %v\n", err)
 		})
 	}
 	waitForStop(d)
 }
 
-func readMarks(f *tab.Follower) {
-	sc := bufio.NewScanner(os.Stdin)
-	for sc.Scan() {
-		if line := strings.TrimSpace(sc.Text()); line == "mark" || line == "m" {
-			fmt.Fprintf(os.Stderr, "marked at %.1fs\n", f.Mark("")/1000)
-		}
+func systemAudioOf(mic *tab.Mic) string {
+	if mic == nil {
+		return ""
 	}
+	return mic.Monitor()
 }

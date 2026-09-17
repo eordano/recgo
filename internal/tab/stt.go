@@ -23,6 +23,20 @@ type Endpoint struct {
 
 var DefaultEndpoints = []Endpoint{}
 
+func Endpoints(flagURL, flagModel, cfgURL, cfgModel string) []Endpoint {
+	if flagURL != "" {
+		return []Endpoint{{URL: flagURL, Model: FirstNonEmpty(flagModel, "whisper")}}
+	}
+	if cfgURL != "" {
+		return []Endpoint{{URL: cfgURL, Model: FirstNonEmpty(cfgModel, "whisper")}}
+	}
+	return DefaultEndpoints
+}
+
+func APIKey(flagKey, cfgKey string) string {
+	return FirstNonEmpty(flagKey, os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY"), cfgKey)
+}
+
 type Segment struct {
 	AudioStartMs float64 `json:"audioStartMs"`
 	AudioEndMs   float64 `json:"audioEndMs"`
@@ -266,7 +280,17 @@ func LocalLiveFeed(ctx context.Context, bin, model, vad string) (*transcribe.Ses
 // while recording; callers announce it on stderr.
 func RemoteLiveFeed(ctx context.Context, ep Endpoint, key, modelOverride string) *transcribe.Session {
 	return transcribe.NewFeed(ctx, transcribe.Config{
-		Endpoint: ep.URL, APIKey: key, Model: firstNonEmpty(modelOverride, ep.Model),
+		Endpoint: ep.URL, APIKey: key, Model: FirstNonEmpty(modelOverride, ep.Model),
+	})
+}
+
+// RealtimeLiveFeed builds a live-transcription session that streams the audio
+// over the endpoint's /v1/realtime websocket as it is spoken, so narration
+// lands within a second instead of a pass every few seconds. Uploads audio
+// while recording, like RemoteLiveFeed; callers announce it on stderr.
+func RealtimeLiveFeed(ctx context.Context, ep Endpoint, key, modelOverride string) *transcribe.Session {
+	return transcribe.NewFeed(ctx, transcribe.Config{
+		Endpoint: ep.URL, APIKey: key, Model: FirstNonEmpty(modelOverride, ep.Model), Realtime: true,
 	})
 }
 
@@ -274,6 +298,14 @@ func RemoteLiveFeed(ctx context.Context, ep Endpoint, key, modelOverride string)
 // stamped with their session time, pass failures reach fail. The goroutine
 // ends when the feed is stopped.
 func ConsumeLive(feed *transcribe.Session, clock *Clock, emit func(t float64, text string), fail func(error)) {
+	ConsumeLiveWith(feed, clock, emit, nil, fail)
+}
+
+// ConsumeLiveWith is ConsumeLive plus partial: the words heard so far of an
+// utterance that has not ended, as the realtime lane streams them. Nothing
+// partial reaches the session document; it is for a HUD to show.
+func ConsumeLiveWith(feed *transcribe.Session, clock *Clock, emit func(t float64, text string),
+	partial func(text string), fail func(error)) {
 	go func() {
 		for st := range feed.Updates() {
 			if st.Err != nil {
@@ -282,6 +314,9 @@ func ConsumeLive(feed *transcribe.Session, clock *Clock, emit func(t float64, te
 			}
 			text := strings.TrimSpace(st.PassText)
 			if text == "" {
+				if partial != nil && strings.TrimSpace(st.Fast) != "" {
+					partial(strings.TrimSpace(st.Fast))
+				}
 				continue
 			}
 			t, ok := clock.FromAudioTime(float64(st.PassStartSample) / transcribe.SampleRate)

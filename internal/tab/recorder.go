@@ -588,6 +588,12 @@ func (r *Recorder) Mark(note string) float64 {
 	return t
 }
 
+func (r *Recorder) Note(text string) float64 {
+	t := r.clock.Now()
+	r.push(Event{T: t, Kind: "note", Text: text})
+	return t
+}
+
 func (r *Recorder) Stop() []Event {
 	r.mu.Lock()
 	if r.stopped {

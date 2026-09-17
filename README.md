@@ -11,6 +11,13 @@ VU meters, device switching, and optional Whisper transcription (local or remote
 - **Vim-like keybindings** for navigation and control
 - **Live transcription** via FFmpeg whisper filter or OpenAI-compatible API
 - **Configurable** via TOML in `$XDG_CONFIG_HOME/recgo/config.toml`
+- **Headless** with `recgo -headless <name>`: the same recording without a
+  terminal, the state the TUI would draw printed on stderr one line per change
+  (`recording -> PATH`, `mic:`/`monitor:`, `HH:MM:SS  narration:`/`system:`/
+  `hearing:`, `error:`, `wrote PATH`, `Uploaded to`), SIGINT or `q` on stdin to
+  stop, `t` / `transcribe on|off` on stdin like the key, `-mic`/`-system-audio`
+  to pin a device and `-transcribe` to start with it on. The desktop apps' Audio
+  only mode is this.
 
 ## macOS
 
@@ -25,15 +32,17 @@ has no monitor sources.
 | `recgo` mic recording | works | ffmpeg; Microphone TCC grant for the terminal app |
 | `recgo` system audio | works | BlackHole + a Multi-Output Device + `switchaudio-osx` (below) |
 | `recgo` live transcription (`t`) | works | same as mic/system capture |
+| `--stt-backend realtime` (session recorders) | works | an OpenAI-compatible endpoint whose `/v1/realtime` websocket does server-VAD transcription (speaches); narration lands within a second, the final transcript still comes from the batch endpoint |
 | Default-device resolution | works | `SwitchAudioSource` on PATH (falls back to avfoundation `:default` without it) |
 | Default-output watcher / re-assert | works | `SwitchAudioSource` (2s poll; no CoreAudio event API without cgo) |
 | Silence watchdog | works (on by default) | — |
 | `recgo-desktop` | works | `screencapture(1)` (ships with macOS); Screen Recording + Microphone TCC grants |
-| `recgo-desktop` click screenshots | works (macOS) | Accessibility (or Input Monitoring) TCC grant; not on Linux yet; `--click-shots=false` disables |
-| `recgo-desktop` focus/dialog screenshots | works (macOS) | rides the Screen Recording grant; not on Linux yet; `--focus-shots=false` disables |
+| `recgo-desktop` click screenshots | works | macOS: Accessibility (or Input Monitoring) TCC grant; Linux (KDE Plasma): your user in the `input` group (evdev for the press, a KWin script for the pointer position and the window under it); `--click-shots=false` disables |
+| `recgo-desktop` focus/dialog screenshots | works | macOS: rides the Screen Recording grant; Linux (KDE Plasma): a KWin script reports focus changes and new windows; `--focus-shots=false` disables |
 | `recgo-desktop` window capture | unsupported | interactive `-w` mode removed (blocked waiting for a click) |
+| `recgo-window` (one screen, picked at start) | works | same grants as `recgo-desktop`; `-screen N` (numbers from `-list-screens`, or `main`) skips the terminal prompt, which is how the app passes its picker's choice |
 | `recgo-browser` / `recgo-tab` | works, no TCC | a Chromium-family browser; auto-discovers Chromium/Chrome/Brave/Edge app bundles when `--chromium` is unset |
-| Session default out dir | guarded | if `~/Documents` is iCloud-synced, defaults to `~/walk-and-talk` with a warning (all three session CLIs) |
+| Session default out dir | guarded | Linux: `~/walk-and-talk` (or `[recording] output_dir` from config.toml); macOS: `~/Documents/walk-and-talk`, falling back to `~/walk-and-talk` with a warning when Documents is iCloud-synced (all three session CLIs and the app) |
 
 ### System audio: BlackHole + Multi-Output Device
 
@@ -86,6 +95,48 @@ record_output_device = "Multi-Output Device"  # "" disables output switching
 [watchdog]
 enabled = true   # silence watchdog re-asserts the output device on recovery
 ```
+
+## Linux (KDE)
+
+The same shell exists for Plasma as `recgo-app` (`linux/`, Python/PySide6):
+tray icon and menu, global shortcuts through KGlobalAccel, HUD and live
+session window kept above by a KWin script, the Library, and Settings. It
+drives the same recorders with the same flags. See `linux/README.md` for the
+Mac → KDE mapping and the `desktop.recgo.app` NixOS options.
+
+```bash
+nix build .#recgo-app && result/bin/recgo-app
+recgo-app --record screen   # verbs forward to the running tray instance
+recgo-app --record window   # one screen or window, picked in the portal dialog
+```
+
+## recgo-window: one screen, picked at start
+
+`recgo-desktop` records every screen. `recgo-window` is the same recorder
+(same flags, same session document, same local-first transcription) pinned
+to one source chosen when it starts, and asked for on every start — nothing
+is remembered between sessions.
+
+```bash
+recgo-window                  # macOS: a numbered list on the terminal; Linux: the portal's picker
+recgo-window -screen 2        # macOS: skip the prompt (numbers from -list-screens, or main)
+recgo-window -list-screens    # one "N<tab>WxH<tab>main" line per display
+```
+
+- **Linux** goes through the desktop's own screencast picker
+  (xdg-desktop-portal, without a restore token), which offers every screen
+  *and* single windows. Frames come from that stream alone; on KDE the click,
+  focus and mark screenshots are `CaptureScreen` of the picked output when it
+  can be told apart by size, else the latest stream frame. `-screen` is
+  ignored there, with a note.
+- **macOS** captures the chosen display with `screencapture -D N`. With one
+  display there is no prompt; with several and no terminal (the app), pass
+  `-screen`.
+
+Every session says what it captured: `Capture: … (screen DP-1, 2560x1440)`
+in `SESSION.md`, and the tool name is `recgo-window`, so the Library filters
+on it as its own mode. Clicks outside the picked source are still listed,
+position only.
 
 ## Architecture
 
@@ -213,3 +264,58 @@ recgo --no-limit meeting-notes
 # Upload the finished recording to the configured [upload] target
 recgo --upload meeting-notes
 ```
+
+## Google Meet prompts
+
+The KDE and Mac apps can ask **Record this Meet call?** after you join a call.
+Enable **Settings → General → Ask to record Google Meet calls** (`meetPrompt`).
+A NixOS module can enable this and start the tray/menu-bar app at login. The
+Mac bundle must be built and installed separately with `mac/build.sh --install`.
+
+Detection uses the local Chromium debugging endpoint on `127.0.0.1:9222`, and
+checks for a visible hangup control on `https://meet.google.com/xxx-xxxx-xxx`.
+A waiting room, muted microphone, or just an open Meet tab does not trigger it.
+The detector reads no transcript or participant information. Meet can change its
+UI, so this DOM check needs revisiting if prompts stop appearing.
+
+- **Not now** is the default. Dismissing silences that joined call. A later rejoin
+  can prompt again. There is a two-second join debounce and a ten-second startup
+  grace (also on detector restarts).
+- **Record call** starts audio-only capture with microphone **and** system audio,
+  using the existing transcription, upload, and privacy settings. On KDE, enable
+  microphone capture in Settings first. No audio is captured before acceptance.
+- Leaving for ten confirmed seconds stops only the recording started by that
+  prompt. A debugger outage does not count as leaving; use Recgo's Stop control
+  if detection is unavailable. A manual stop suppresses restarting that call.
+- Existing manual recordings are untouched. Disabling detection hands any active
+  Meet recording back to manual control.
+
+A Chromium configured with the loopback debugging flag picks it up on its next
+browser start. An already-running browser must be fully quit and opened again
+for new flags to take effect; recgo does not restart it. On macOS, start
+Chromium with the flag before joining Meet:
+
+```sh
+open -a Chromium --args --remote-debugging-port=9222
+```
+
+This also requires fully quitting an existing Chromium process first. Firefox
+and Safari are not supported by this detector. For Google Chrome (rather than
+Chromium), [Chrome requires a non-default profile for remote debugging](https://developer.chrome.com/blog/remote-debugging-port);
+use a dedicated profile, for example:
+
+```sh
+open -a 'Google Chrome' --args --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/Library/Application Support/Recgo/MeetChrome"
+```
+
+On macOS, select a **Multi-Output Device** containing your speakers and BlackHole
+in Sound settings, and set Recgo's **Audio → Meet system audio device** to the
+loopback name (default `BlackHole 2ch`). The microphone stays a separate input.
+Unavailable system audio is an error for Meet recordings, rather than a silent
+fallback to recording only your side.
+
+For diagnostics, `recgo-meet-watch -once` prints a JSON snapshot and exits without
+recording or prompting. The running KDE app also reports `meet=watching` or
+`meet=browser_unavailable` in `recgo-app --status`. The helper speaks newline JSON
+on stdout for the shells and is included in both the Nix package and Mac bundle.

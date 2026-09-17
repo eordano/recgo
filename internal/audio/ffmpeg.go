@@ -40,7 +40,7 @@ type Recorder struct {
 	started      bool
 }
 
-var progressRegex = regexp.MustCompile(`size=\s*(\d+)\s*([KMGTkmgt]i?[Bb])?\s+time=(\d+:\d+:\d+\.\d+)\s+bitrate=\s*([\d.]+)kbits/s\s+speed=([\d.]+)x`)
+var progressRegex = regexp.MustCompile(`size=\s*(\d+)\s*([KMGTkmgt]i?[Bb])?\s+time=(\d+:\d+:\d+\.\d+)\s+bitrate=\s*([\d.]+)kbits/s\s+speed=\s*([\d.]+)x`)
 
 func NewRecorder(outputPath, micDevice, monitorDevice, codec, bitrate string) *Recorder {
 	return &Recorder{

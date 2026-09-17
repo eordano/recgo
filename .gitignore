@@ -5,3 +5,9 @@ result-*
 /recgo-tab
 /recgo-browser
 /recgo-desktop
+/recgo-window
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+vendor/

@@ -122,6 +122,22 @@ func Display(dest string) string {
 	return host + ":" + path
 }
 
+// LocalMirror is the path a synced session has on this machine when the
+// rsync destination's directory is also mounted here (a shared session root
+// mounted at the same absolute path on every host), so the line printed
+// after a sync is one that pastes into an agent on any host. Empty when the
+// destination has no host part or its path is not a directory here.
+func LocalMirror(dest string) string {
+	_, path, ok := strings.Cut(dest, ":")
+	if !ok || !strings.HasPrefix(path, "/") {
+		return ""
+	}
+	if st, err := os.Stat(path); err != nil || !st.IsDir() {
+		return ""
+	}
+	return path
+}
+
 func Upload(cfg config.UploadConfig, file string) (string, error) {
 	if !cfg.Enabled {
 		return "", nil

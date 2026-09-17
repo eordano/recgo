@@ -1,6 +1,7 @@
 {
   lib,
   stdenv,
+  stdenvNoCC,
   buildGoModule,
   ffmpeg-full,
   chromium,
@@ -19,14 +20,38 @@ let
     withWhisper = false;
     withFrei0r = false;
   };
+  binary = buildGoModule {
+    pname = "recgo";
+    version = "0.1.0";
+    src = lib.fileset.toSource {
+      root = ./.;
+      fileset = lib.fileset.unions [
+        ./go.mod
+        ./go.sum
+        ./cmd
+        ./internal
+      ];
+    };
+
+    vendorHash = "sha256-CSO0qBt/87wAygdcOOs5FuL5tlrjE9yUMs1E5Z+3TV4=";
+
+    __darwinAllowLocalNetworking = true;
+  };
 in
-buildGoModule rec {
+stdenvNoCC.mkDerivation rec {
   pname = "recgo";
-  version = "0.1.0";
-
-  src = ./.;
-
-  vendorHash = null;
+  inherit (binary) version;
+  dontUnpack = true;
+  dontConfigure = true;
+  dontBuild = true;
+  passthru = { inherit binary; };
+  installPhase = ''
+    runHook preInstall
+    mkdir -p $out
+    cp -r ${binary}/bin $out/bin
+    chmod -R u+w $out/bin
+    runHook postInstall
+  '';
 
   nativeBuildInputs = [ makeWrapper ];
 
@@ -67,7 +92,7 @@ buildGoModule rec {
         # Without it the KDE screenshot path fails with "The process is not
         # authorized to take a screenshot".
         mkdir -p $out/share/applications
-        for tabBin in recgo-tab recgo-browser recgo-desktop; do
+        for tabBin in recgo-tab recgo-browser recgo-desktop recgo-window; do
           cat > $out/share/applications/$tabBin.desktop <<EOF
     [Desktop Entry]
     Type=Application
@@ -78,7 +103,7 @@ buildGoModule rec {
     EOF
         done
 
-        for tabBin in recgo-tab recgo-browser recgo-desktop; do
+        for tabBin in recgo-tab recgo-browser recgo-desktop recgo-window; do
           wrapProgram $out/bin/$tabBin \
             --prefix PATH : ${
               lib.makeBinPath (

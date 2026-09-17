@@ -283,13 +283,22 @@ func (m Model) renderTranscript() string {
 		width = 20
 	}
 
-	b.WriteString(m.renderTranscriptBlock("M", m.transcriptMic, width))
+	b.WriteString(m.renderTranscriptBlock(badgeWithSpeaker("M", m.speakerMic), m.transcriptMic, width))
 	b.WriteString("\n")
-	b.WriteString(m.renderTranscriptBlock("S", m.transcriptSys, width))
+	b.WriteString(m.renderTranscriptBlock(badgeWithSpeaker("S", m.speakerSys), m.transcriptSys, width))
 	return b.String()
 }
 
 const transcriptMaxLines = 3
+
+// badgeWithSpeaker labels a track badge with the speaker speaches last
+// identified on it ("S · Esteban"); an unidentified track keeps the bare badge.
+func badgeWithSpeaker(badge, speaker string) string {
+	if speaker == "" {
+		return badge
+	}
+	return badge + " · " + speaker
+}
 
 func (m Model) renderTranscriptBlock(badge, text string, width int) string {
 	var b strings.Builder

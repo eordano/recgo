@@ -36,3 +36,17 @@ func TestShotArgs(t *testing.T) {
 		t.Error("shotArgs(true, false): want unsupported error, got nil")
 	}
 }
+
+func TestShotArgsDisplay(t *testing.T) {
+	args, err := shotArgsDisplay(false, true, 2)
+	if err != nil {
+		t.Fatalf("shotArgsDisplay(false, true, 2): %v", err)
+	}
+	if i := slices.Index(args, "-D"); i < 0 || i+1 >= len(args) || args[i+1] != "2" {
+		t.Errorf("shotArgsDisplay(false, true, 2) = %v, want -D 2", args)
+	}
+	args, _ = shotArgsDisplay(false, true, 0)
+	if slices.Contains(args, "-D") {
+		t.Errorf("shotArgsDisplay(false, true, 0) = %v, want no -D (every display)", args)
+	}
+}

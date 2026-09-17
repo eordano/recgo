@@ -21,6 +21,11 @@ func Available() (bool, string) {
 }
 
 func shotArgs(window bool, includeCursor bool) ([]string, error) {
+	return shotArgsDisplay(window, includeCursor, 0)
+}
+
+// display is the 1-based screencapture -D number; 0 captures every display.
+func shotArgsDisplay(window bool, includeCursor bool, display int) ([]string, error) {
 	if window {
 		return nil, fmt.Errorf("window capture unsupported on darwin")
 	}
@@ -28,15 +33,22 @@ func shotArgs(window bool, includeCursor bool) ([]string, error) {
 	if includeCursor {
 		args = append(args, "-C")
 	}
+	if display > 0 {
+		args = append(args, "-D", fmt.Sprint(display))
+	}
 	return args, nil
 }
 
 func Shot(window bool, includeCursor bool, timeout time.Duration) (image.Image, error) {
+	return ShotDisplay(0, includeCursor, timeout)
+}
+
+func ShotDisplay(display int, includeCursor bool, timeout time.Duration) (image.Image, error) {
 	if timeout == 0 {
 		timeout = 10 * time.Second
 	}
 
-	args, err := shotArgs(window, includeCursor)
+	args, err := shotArgsDisplay(false, includeCursor, display)
 	if err != nil {
 		return nil, err
 	}

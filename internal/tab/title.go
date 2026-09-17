@@ -110,7 +110,7 @@ func sessionDigest(tr *Transcript, events []Event) string {
 		case e.Kind == "click" && len(clicked) < 40:
 			label := ""
 			if e.Elem != nil {
-				label = firstNonEmpty(e.Elem.Text, e.Elem.AriaLabel, e.Elem.TestID, e.Elem.ID, e.Elem.Tag)
+				label = FirstNonEmpty(e.Elem.Text, e.Elem.AriaLabel, e.Elem.TestID, e.Elem.ID, e.Elem.Tag)
 			}
 			if label != "" {
 				clicked = append(clicked, clip(label, 40))

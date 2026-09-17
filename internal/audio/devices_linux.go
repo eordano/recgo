@@ -61,6 +61,60 @@ func GetDefaultSink() (string, error) {
 	return runPactl("get-default-sink")
 }
 
+func DefaultMonitor() (string, error) {
+	sink, err := GetDefaultSink()
+	if err != nil {
+		return "", err
+	}
+	if sink == "" {
+		return "", fmt.Errorf("no default sink")
+	}
+	return sink + ".monitor", nil
+}
+
+type paSourceOutput struct {
+	Index      int               `json:"index"`
+	Properties map[string]string `json:"properties"`
+}
+
+func findSourceOutput(streamName string, pid int) (int, error) {
+	out, err := runPactl("--format=json", "list", "source-outputs")
+	if err != nil {
+		return 0, err
+	}
+	var outputs []paSourceOutput
+	if err := json.Unmarshal([]byte(out), &outputs); err != nil {
+		return 0, err
+	}
+	for _, o := range outputs {
+		if o.Properties["media.name"] == streamName &&
+			o.Properties["application.process.id"] == strconv.Itoa(pid) {
+			return o.Index, nil
+		}
+	}
+	return 0, fmt.Errorf("no capture stream %q owned by pid %d", streamName, pid)
+}
+
+func SetStreamMuted(streamName string, pid int, muted bool) error {
+	var idx int
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		if idx, err = findSourceOutput(streamName, pid); err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err != nil {
+		return err
+	}
+	flag := "0"
+	if muted {
+		flag = "1"
+	}
+	_, err = runPactl("set-source-output-mute", strconv.Itoa(idx), flag)
+	return err
+}
+
 func ListSources() ([]Device, error) {
 	out, err := runPactl("--format=json", "list", "sources")
 	if err != nil {

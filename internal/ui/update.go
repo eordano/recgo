@@ -17,9 +17,31 @@ import (
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	if nm, ok := next.(Model); ok && nm.headless {
+		text := ""
+		if nm.err != nil {
+			text = nm.err.Error()
+		}
+		if text != "" && text != nm.lastErrText {
+			nm.say("error: %s", text)
+		}
+		nm.lastErrText = text
+		return nm, cmd
+	}
+	return next, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case StopMsg:
+		return m.handleQuit()
+
+	case CommandMsg:
+		return m.handleCommand(string(msg))
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -32,6 +54,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			logging.Log("device loading failed: %v", msg.err)
 			m.err = msg.err
+			if m.headless {
+				return m, tea.Quit
+			}
 			return m, nil
 		}
 		logging.Log("loaded %d mics, %d monitors", len(msg.mics), len(msg.monitors))
@@ -60,6 +85,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		m = m.applyWantedDevices()
 
 		if m.config.RecordOutputDevice != "" && m.savedOutput == "" {
 			if prev, err := audio.GetDefaultOutput(); err != nil {
@@ -79,6 +105,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			logging.Log("recording start failed: %v", msg.err)
 			m.err = msg.err
+			if m.headless && m.recorder == nil {
+				return m, tea.Quit
+			}
 			return m, nil
 		}
 		logging.Log("recording started at %s", msg.startTime.Format("15:04:05"))
@@ -95,6 +124,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.segments = append(m.segments, segPath)
 		if m.sessionFinalPath == "" {
 			m.sessionFinalPath = segPath
+		}
+		m.say("recording -> %s", m.sessionFinalPath)
+		if m.selectedMic < len(m.mics) {
+			m.say("mic: %s", m.mics[m.selectedMic].Name)
+		} else {
+			m.say("mic: none")
+		}
+		if msg.monitorSource != "" {
+			m.say("monitor: %s", msg.monitorSource)
+		} else {
+			m.say("monitor: none")
 		}
 
 		if m.selectedMic < len(m.mics) {
@@ -201,6 +241,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case maxDurationMsg:
 		if m.recording {
+			m.say("max duration %s reached, stopping", m.config.Recording.MaxDuration)
 			return m.handleQuit()
 		}
 		return m, nil
@@ -226,11 +267,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.src {
 		case transcribeSourceMic:
 			m.transcriptMic = msg.state.Locked
+			if msg.state.Speaker != "" {
+				m.speakerMic = msg.state.Speaker
+			}
+			m.sayTranscript("narration", msg.state)
 			if m.transcribeMic != nil {
 				cmds = append(cmds, waitForTranscribe(m.transcribeMic.Updates(), transcribeSourceMic))
 			}
 		case transcribeSourceSys:
 			m.transcriptSys = msg.state.Locked
+			if msg.state.Speaker != "" {
+				m.speakerSys = msg.state.Speaker
+			}
+			m.sayTranscript("system", msg.state)
 			if m.transcribeSys != nil {
 				cmds = append(cmds, waitForTranscribe(m.transcribeSys.Updates(), transcribeSourceSys))
 			}
@@ -534,13 +583,83 @@ func (m Model) handleQuit() (tea.Model, tea.Cmd) {
 	if len(m.segments) > 1 && m.sessionFinalPath != "" {
 		if err := concatSession(m.segments, m.sessionFinalPath); err != nil {
 			logging.Log("session concat failed: %v (segments preserved)", err)
+			m.say("segments kept apart: %v", err)
 		} else {
 			logging.Log("session concat -> %s", m.sessionFinalPath)
 		}
 	}
+	if m.sessionFinalPath != "" {
+		m.say("wrote %s", m.sessionFinalPath)
+	}
 
 	m.cancel()
 	return m, tea.Quit
+}
+
+// handleCommand is the stdin side of -headless: the t and q keys by name.
+func (m Model) handleCommand(line string) (tea.Model, tea.Cmd) {
+	switch strings.TrimSpace(line) {
+	case "q", "quit", "stop":
+		return m.handleQuit()
+	case "t", "transcribe", "transcribe on":
+		if m.transcribing {
+			return m, nil
+		}
+		if !m.recording {
+			m.transcribing = true
+			return m, nil
+		}
+		return m.startTranscribe()
+	case "transcribe off":
+		return m.stopTranscribe(), nil
+	}
+	return m, nil
+}
+
+// applyWantedDevices pins the -mic / -system-audio choices over the defaults
+// once the device list is known; an unknown name keeps the default and says so.
+func (m Model) applyWantedDevices() Model {
+	pick := func(want string, devices []audio.Device, kind string, sel int) int {
+		if want == "" || want == "default" {
+			return sel
+		}
+		if i := indexByName(devices, want); i >= 0 {
+			return i
+		}
+		def := "none"
+		if sel < len(devices) {
+			def = devices[sel].Name
+		}
+		logging.Log("%s %q not found, using %s", kind, want, def)
+		m.say("%s %q not found, using %s", kind, want, def)
+		return sel
+	}
+	m.selectedMic = pick(m.wantMic, m.mics, "mic", m.selectedMic)
+	m.selectedMon = pick(m.wantMon, m.monitors, "monitor", m.selectedMon)
+	return m
+}
+
+// sayTranscript prints a track's transcript as the TUI would show it: a
+// completed utterance as a narration/system line (with the speaker speaches
+// matched, when it did), a partial one as `hearing`.
+func (m Model) sayTranscript(track string, st transcribe.State) {
+	if !m.headless {
+		return
+	}
+	if text := strings.TrimSpace(st.PassText); text != "" {
+		if st.Speaker != "" {
+			text = "[" + st.Speaker + "] " + text
+		}
+		m.say("%s  %s: %s", m.clock(), track, text)
+		return
+	}
+	partial := st.Fast
+	if partial == "" {
+		partial = st.Pending
+	}
+	if partial = strings.TrimSpace(partial); partial != "" {
+		m.say("%s  hearing: %s", m.clock(), partial)
+	}
 }
 
 func concatSession(segments []string, finalPath string) error {

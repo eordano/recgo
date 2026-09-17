@@ -23,6 +23,7 @@ type Meta struct {
 	TargetTitle string  `json:"targetTitle,omitempty"`
 	Tool        string  `json:"tool"`
 	AudioNote   string  `json:"audioNote,omitempty"`
+	SystemAudio string  `json:"systemAudio,omitempty"`
 	TitleNote   string  `json:"titleNote,omitempty"`
 
 	System *SystemInfo `json:"system,omitempty"`
@@ -126,7 +127,7 @@ func DeterministicSlug(events []Event) string {
 		if e.Kind != "click" || e.Elem == nil {
 			continue
 		}
-		label := firstNonEmpty(e.Elem.TestID, e.Elem.Text, e.Elem.AriaLabel, e.Elem.ID)
+		label := FirstNonEmpty(e.Elem.TestID, e.Elem.Text, e.Elem.AriaLabel, e.Elem.ID)
 		if label == "" {
 			continue
 		}
@@ -171,7 +172,7 @@ func DeterministicSlug(events []Event) string {
 	return s
 }
 
-func firstNonEmpty(vals ...string) string {
+func FirstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if v != "" {
 			return v
@@ -471,9 +472,11 @@ func buildStream(events []Event, utterances []Utterance) []streamLine {
 			add(e.T, 2, fmt.Sprintf("%s  console.%s: %s", stamp, consoleLevel(e), clip(e.Text, 200)))
 		case e.Kind == "navigation":
 			add(e.T, 2, fmt.Sprintf("%s  Navigate: %s", stamp, e.URL))
+		case e.Kind == "note":
+			add(e.T, 2, fmt.Sprintf("%s  Note: %s", stamp, oneLine(e.Text)))
 		case e.Kind == "tab-switch":
 			add(e.T, 2, fmt.Sprintf("%s  Tab: %s",
-				stamp, oneLine(firstNonEmpty(e.Title, e.URL))))
+				stamp, oneLine(FirstNonEmpty(e.Title, e.URL))))
 		case e.Kind == "hmr":
 			files := strings.Join(e.Files, ", ")
 			add(e.T, 2, oneLine(fmt.Sprintf("%s  HMR: %s %s %s", stamp, e.Flavor, e.Type, files)))
@@ -602,7 +605,7 @@ func Pack(outDir string, events []Event, clock *Clock, tr *Transcript, meta Meta
 	}
 	w("# Session: %s", title)
 	w("")
-	w("Start: %s", firstNonEmpty(meta.StartedWall, meta.StartedISO))
+	w("Start: %s", FirstNonEmpty(meta.StartedWall, meta.StartedISO))
 	if meta.Cwd != "" {
 		w("Folder: %s", meta.Cwd)
 	}
@@ -618,7 +621,7 @@ func Pack(outDir string, events []Event, clock *Clock, tr *Transcript, meta Meta
 	}
 	label, subject := "Page", fmt.Sprintf("%d clicks", clicks)
 	switch meta.Tool {
-	case "recgo-desktop":
+	case "recgo-desktop", "recgo-window":
 		label, subject = "Capture", fmt.Sprintf("%d clicks · %d marks", clicks, marks)
 	case "recgo-audio":
 		label, subject = "Capture", fmt.Sprintf("%d marks", marks)
@@ -655,7 +658,12 @@ func Pack(outDir string, events []Event, clock *Clock, tr *Transcript, meta Meta
 		w("  so there are no frames or screenshots. Marks are the moments you flagged")
 		w("  with `m`.")
 		w("- All timestamps come from one clock, so order and spacing are exact.")
-	} else if meta.Tool == "recgo-desktop" {
+	} else if meta.Tool == "recgo-desktop" || meta.Tool == "recgo-window" {
+		if meta.Tool == "recgo-window" {
+			w("- Only the screen (or window) picked when the recording started was")
+			w("  captured: every frame and screenshot shows that one source. Clicks")
+			w("  elsewhere still appear, as position-only lines.")
+		}
 		w("- Clicks come from a system-wide listener: position only, since outside a")
 		w("  browser nothing names the control under the cursor. Marks are the moments")
 		w("  you flagged with `m`. Focus lines are the moment another window, app or")
@@ -676,6 +684,10 @@ func Pack(outDir string, events []Event, clock *Clock, tr *Transcript, meta Meta
 	}
 	if meta.AudioNote != "" {
 		w("- Audio anchor: %s", oneLine(meta.AudioNote))
+	}
+	if meta.SystemAudio != "" {
+		w("- System audio (%s) is mixed into audio.wav with the microphone; a", meta.SystemAudio)
+		w("  `Note: system audio off/on` line marks where it was toggled.")
 	}
 	hmrLog := hmrLogPath(outDir)
 	if hmrLog != "" {

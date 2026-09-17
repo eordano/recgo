@@ -65,15 +65,39 @@ func helpText(t *testing.T, cli string) string {
 
 // recgo-browser is the default recorder, recgo-tab its pinned-to-one-tab
 // sibling, and recgo-desktop the same recorder pointed at the screen instead
-// of a browser; they share defaults and flags, so every promise below has to
-// hold for all three.
-var sessionCLIs = []string{"recgo-browser", "recgo-tab", "recgo-desktop"}
+// of a browser (recgo-window: at one screen picked at start); they share
+// defaults and flags, so every promise below has to hold for all four.
+var sessionCLIs = []string{"recgo-browser", "recgo-tab", "recgo-desktop", "recgo-window"}
+
+// recgo-desktop and recgo-window are two names for internal/desktop, so the
+// "wired in main.go only" rules apply to that package's one non-test file.
+func cliSourceDirs(cli string) []string {
+	dirs := []string{"../../cmd/" + cli}
+	if cli == "recgo-desktop" || cli == "recgo-window" {
+		dirs = append(dirs, "../desktop")
+	}
+	return dirs
+}
+
+func cliImports(t *testing.T, cli string) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
+	for _, dir := range cliSourceDirs(cli) {
+		for file, imports := range packageImports(t, dir) {
+			if file == "desktop.go" {
+				file = "main.go"
+			}
+			out[file] = append(out[file], imports...)
+		}
+	}
+	return out
+}
 
 func TestTabSyncIsAnnouncedInHelp(t *testing.T) {
 	// The uploader is only reachable from main.go, where the flag that turns
 	// it on is defined and documented.
 	for _, cli := range sessionCLIs {
-		for file, imports := range packageImports(t, "../../cmd/"+cli) {
+		for file, imports := range cliImports(t, cli) {
 			for _, imp := range imports {
 				if strings.Contains(imp, "internal/upload") && file != "main.go" {
 					t.Errorf("cmd/%s/%s imports %s -- session upstream is wired in main.go only",
@@ -122,8 +146,8 @@ func TestNetworkEgressIsConfinedToTheSTTBackend(t *testing.T) {
 		}
 	}
 
-	for _, cli := range []string{"recgo-tab", "recgo-browser", "recgo-desktop"} {
-		for file, imports := range packageImports(t, "../../cmd/"+cli) {
+	for _, cli := range sessionCLIs {
+		for file, imports := range cliImports(t, cli) {
 			for _, imp := range imports {
 				if imp == "net/http" || imp == "net" {
 					t.Errorf("cmd/%s/%s imports %s -- egress belongs in the opt-in backends, not the CLI", cli, file, imp)
@@ -169,18 +193,35 @@ func TestDefaultBackendIsAuto(t *testing.T) {
 // auto with no local model), and clicks are screenshotted by default with a
 // way to turn that off.
 func TestDesktopHelpStatesLocalVideoAndClickShots(t *testing.T) {
-	text := helpText(t, "recgo-desktop")
-	if !strings.Contains(text, "Video and screenshots stay on this machine") {
-		t.Errorf("recgo-desktop help no longer states that video stays local:\n%s", text)
+	for _, cli := range []string{"recgo-desktop", "recgo-window"} {
+		text := helpText(t, cli)
+		if !strings.Contains(text, "Video and screenshots stay on this machine") {
+			t.Errorf("%s help no longer states that video stays local:\n%s", cli, text)
+		}
+		if !strings.Contains(text, "-click-shots") {
+			t.Errorf("%s has no -click-shots flag; per-click screenshots are unreachable or undisableable", cli)
+		}
+		if !strings.Contains(text, "-focus-shots") {
+			t.Errorf("%s has no -focus-shots flag; focus/dialog screenshots are unreachable or undisableable", cli)
+		}
+		if !strings.Contains(text, "Accessibility") {
+			t.Errorf("%s help does not say click capture needs the Accessibility grant on macOS", cli)
+		}
 	}
-	if !strings.Contains(text, "-click-shots") {
-		t.Error("recgo-desktop has no -click-shots flag; per-click screenshots are unreachable or undisableable")
+}
+
+// recgo-window's own promise: one source, chosen every time it starts, never
+// remembered -- and a way for a GUI to make that choice for it.
+func TestWindowHelpStatesOneSourcePickedAtStart(t *testing.T) {
+	text := helpText(t, "recgo-window")
+	for _, want := range []string{"Only the screen (or window) picked at start is captured",
+		"never remembered", "-screen", "-list-screens"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("recgo-window help lacks %q:\n%s", want, text)
+		}
 	}
-	if !strings.Contains(text, "-focus-shots") {
-		t.Error("recgo-desktop has no -focus-shots flag; focus/dialog screenshots are unreachable or undisableable")
-	}
-	if !strings.Contains(text, "Accessibility") {
-		t.Error("recgo-desktop help does not say click capture needs the Accessibility grant on macOS")
+	if strings.Contains(helpText(t, "recgo-desktop"), "-list-screens") {
+		t.Error("recgo-desktop grew -list-screens; picking one screen is recgo-window's job")
 	}
 }
 

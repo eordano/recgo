@@ -20,5 +20,9 @@ func DefaultChromium() string {
 }
 
 func DefaultOutRoot() string {
-	return filepath.Join(DocumentsDir(), "walk-and-talk")
+	if dir := ConfiguredOutRoot(); dir != "" {
+		return dir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "walk-and-talk")
 }

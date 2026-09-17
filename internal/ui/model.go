@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -29,6 +31,15 @@ type Model struct {
 
 	config     *config.Config
 	recordName string
+
+	// Headless: no terminal at all, the state the TUI would draw goes out
+	// as one line per change so a GUI (the desktop app) can show it.
+	headless       bool
+	out            io.Writer
+	wantMic        string
+	wantMon        string
+	autoTranscribe bool
+	lastErrText    string
 
 	mode      AppMode
 	recording bool
@@ -58,6 +69,8 @@ type Model struct {
 	transcribing  bool
 	transcriptMic string
 	transcriptSys string
+	speakerMic    string
+	speakerSys    string
 	transcribeMic *transcribe.Session
 	transcribeSys *transcribe.Session
 
@@ -188,28 +201,81 @@ func (m Model) FinalRecording() string {
 }
 
 func NewModel(cfg *config.Config, recordName string) Model {
+	return NewModelWith(cfg, recordName, Options{})
+}
+
+// Options is what `recgo -headless` adds over the TUI: the protocol writer,
+// a device picked up front instead of with the m/s keys, and transcription
+// on from the start instead of with the t key.
+type Options struct {
+	Headless   bool
+	Out        io.Writer
+	Mic        string
+	Monitor    string
+	Transcribe bool
+}
+
+func NewModelWith(cfg *config.Config, recordName string, o Options) Model {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return Model{
-		config:        cfg,
-		recordName:    recordName,
-		mode:          ModeNormal,
-		keyMap:        DefaultKeyMap(),
-		help:          help.New(),
-		settingsPanel: NewSettingsPanel(cfg),
-		ctx:           ctx,
-		cancel:        cancel,
+		config:         cfg,
+		recordName:     recordName,
+		mode:           ModeNormal,
+		keyMap:         DefaultKeyMap(),
+		help:           help.New(),
+		settingsPanel:  NewSettingsPanel(cfg),
+		ctx:            ctx,
+		cancel:         cancel,
+		headless:       o.Headless,
+		out:            o.Out,
+		wantMic:        o.Mic,
+		wantMon:        o.Monitor,
+		autoTranscribe: o.Transcribe,
+		transcribing:   o.Transcribe,
 	}
 }
 
+// Err is the last error the TUI would be showing; headless callers exit
+// non-zero on it when no recording was produced.
+func (m Model) Err() error { return m.err }
+
+// StopMsg asks for the same shutdown the q key does: stop the recorder,
+// restore the output device, concat the segments.
+type StopMsg struct{}
+
+// CommandMsg is one line typed on the headless recorder's stdin.
+type CommandMsg string
+
+func (m Model) say(format string, a ...any) {
+	if m.headless && m.out != nil {
+		fmt.Fprintf(m.out, format+"\n", a...)
+	}
+}
+
+func (m Model) clock() string {
+	if m.startTime.IsZero() {
+		return "00:00:00"
+	}
+	s := int(time.Since(m.startTime).Seconds())
+	return fmt.Sprintf("%02d:%02d:%02d", s/3600, s/60%60, s%60)
+}
+
+func indexByName(devices []audio.Device, name string) int {
+	for i, d := range devices {
+		if d.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		m.loadDevices,
-		m.startSinkWatcher,
-		diagTickCmd(),
-		watchdogTickCmd(),
-		tea.EnterAltScreen,
-	)
+	cmds := []tea.Cmd{m.loadDevices, m.startSinkWatcher, diagTickCmd(), watchdogTickCmd()}
+	if !m.headless {
+		cmds = append(cmds, tea.EnterAltScreen)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) startSinkWatcher() tea.Msg {

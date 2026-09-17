@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Windows.shared.showHUD()
             Windows.shared.showLiveWindow()
         }
+        MeetWatcher.shared.start()
         recorder.onFinished = { [weak self] dir in
             Windows.shared.closeHUD()
             Windows.shared.closeLiveWindow()
@@ -50,7 +51,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.closeAfterStop = false
                 return
             }
-            if let dir {
+            var isDir: ObjCBool = false
+            if let dir, FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), !isDir.boolValue {
+                // Audio only: recgo wrote one file, not a session folder;
+                // the Library lists folders, so point at the file instead.
+                NSWorkspace.shared.activateFileViewerSelecting([dir])
+            } else if let dir {
                 Windows.shared.showLibrary(selecting: dir.lastPathComponent)
             } else if !recorder.lastError.isEmpty {
                 let alert = NSAlert()
@@ -64,6 +70,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 alert.runModal()
             }
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        MeetWatcher.shared.shutdown()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

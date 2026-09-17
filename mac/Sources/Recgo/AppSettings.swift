@@ -3,12 +3,13 @@ import SwiftUI
 import ServiceManagement
 
 enum RecordMode: String, CaseIterable, Identifiable {
-    case screen, browser, tab, audio
+    case screen, window, browser, tab, audio
     var id: String { rawValue }
 
     var label: String {
         switch self {
         case .screen: return "Screen"
+        case .window: return "Window"
         case .browser: return "Browser"
         case .tab: return "This Tab"
         case .audio: return "Audio only"
@@ -18,6 +19,7 @@ enum RecordMode: String, CaseIterable, Identifiable {
     var shortcutKey: String {
         switch self {
         case .screen: return "shortcutRecordScreen"
+        case .window: return "shortcutRecordWindow"
         case .browser: return "shortcutRecordBrowser"
         case .tab: return "shortcutRecordTab"
         case .audio: return "shortcutRecordAudio"
@@ -29,10 +31,14 @@ enum RecordMode: String, CaseIterable, Identifiable {
 
     var binary: String {
         switch self {
-        // Audio only is the desktop recorder with -no-video: the same
-        // session pipeline (marks, live doc, SESSION.md), minus the screen.
-        // The recgo TUI is terminal-only and speaks none of that protocol.
-        case .screen, .audio: return "recgo-desktop"
+        // Audio only is `recgo <name>` itself, run -headless: the same
+        // three-track file, devices, watchdog and upload as the terminal,
+        // with the state the TUI would draw printed one line per change.
+        case .audio: return "recgo"
+        case .screen: return "recgo-desktop"
+        // One display, chosen at start: recgo-desktop's pipeline pinned to
+        // the screen the picker hands it as -screen N.
+        case .window: return "recgo-window"
         case .browser: return "recgo-browser"
         case .tab: return "recgo-tab"
         }
@@ -47,12 +53,14 @@ final class AppSettings: ObservableObject {
     @AppStorage("outRoot") var outRoot =
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents/walk-and-talk").path
+    @AppStorage("meetPrompt") var meetPrompt = false
     @AppStorage("menuTimer") var menuTimer = true
     @AppStorage("autoTitle") var autoTitle = true
     @AppStorage("defaultMode") var defaultModeRaw = RecordMode.screen.rawValue
     @AppStorage("clickShots") var clickShots = true
     @AppStorage("focusShots") var focusShots = true
     @AppStorage("captureMic") var captureMic = true
+    @AppStorage("monitorDevice") var monitorDevice = "BlackHole 2ch"
     @AppStorage("micDevice") var micDevice = ""
     @AppStorage("sttBackend") var sttBackend = "auto"
     @AppStorage("sttLanguage") var sttLanguage = ""
@@ -74,6 +82,7 @@ final class AppSettings: ObservableObject {
     // Global hotkey chords, e.g. "cmd+shift+1". Empty means the action has
     // no system-wide key; nothing is grabbed out of the box.
     @AppStorage("shortcutRecordScreen") var shortcutRecordScreen = ""
+    @AppStorage("shortcutRecordWindow") var shortcutRecordWindow = ""
     @AppStorage("shortcutRecordBrowser") var shortcutRecordBrowser = ""
     @AppStorage("shortcutRecordTab") var shortcutRecordTab = ""
     @AppStorage("shortcutRecordAudio") var shortcutRecordAudio = ""
@@ -95,11 +104,25 @@ final class AppSettings: ObservableObject {
     var syncActive: Bool { syncEnabled && !neverUpload && !syncTarget.isEmpty }
 
     // The rsync-able location a finished session lands at, for handing to an
-    // agent or a teammate on another host.
+    // agent or a teammate on another host. The fleet mounts the sync
+    // destination at the same absolute path on every host, so when that
+    // directory is mounted here the plain path is returned -- it pastes
+    // unchanged anywhere -- and the user@host: form only when it is not.
     func remoteLocation(for sessionID: String) -> String? {
         guard syncActive else { return nil }
-        return syncTarget.hasSuffix("/") ? syncTarget + sessionID
+        let remote = syncTarget.hasSuffix("/") ? syncTarget + sessionID
             : syncTarget + "/" + sessionID
+        if let colon = remote.firstIndex(of: ":") {
+            let path = String(remote[remote.index(after: colon)...])
+            var isDir: ObjCBool = false
+            if path.hasPrefix("/"),
+               FileManager.default.fileExists(atPath: (path as NSString).deletingLastPathComponent,
+                                              isDirectory: &isDir),
+               isDir.boolValue {
+                return path
+            }
+        }
+        return remote
     }
     var effectiveSTTBackend: String {
         if neverUpload && (sttBackend == "auto" || sttBackend == "remote") { return "local" }

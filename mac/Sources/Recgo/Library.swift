@@ -360,7 +360,7 @@ struct LibraryView: View {
                 Text("Mode").font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.faint)
                     .padding(.horizontal, 10).padding(.vertical, 5)
-                ForEach(["screen", "browser", "tab", "audio"], id: \.self) { m in
+                ForEach(["screen", "window", "browser", "tab", "audio"], id: \.self) { m in
                     sideRow(m.capitalized, count: store.modeCount(m),
                             active: store.modeFilter == m) {
                         store.modeFilter = store.modeFilter == m ? nil : m

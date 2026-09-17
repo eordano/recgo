@@ -225,6 +225,13 @@ func (f *Follower) Mark(note string) float64 {
 	return t
 }
 
+func (f *Follower) Note(text string) float64 {
+	t := f.Recording.Clock.Now()
+	f.Recording.Push(Event{T: t, Kind: "note", Text: text, TargetID: f.Recording.ActiveTarget()})
+	f.notify()
+	return t
+}
+
 func (f *Follower) Count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

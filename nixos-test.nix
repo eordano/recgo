@@ -144,7 +144,7 @@ let
               # The folder holds unredacted narration and screenshots of whatever
               # was on screen; group- or world-readable is a leak, and a silent one.
               machine.succeed(
-                  "su - alice -c 'XDG_RUNTIME_DIR=/run/user/1000 mkdir -p ~/Documents'"
+                  "su - alice -c 'XDG_RUNTIME_DIR=/run/user/1000 mkdir -p ~/walk-and-talk'"
               )
               machine.succeed(
                   "su - alice -c 'XDG_RUNTIME_DIR=/run/user/1000 "
@@ -158,16 +158,18 @@ let
               assert bad == "", f"world/group readable files in the session:\n{bad}"
         ''}
 
-        with subtest("all three binaries run"):
+        with subtest("the session recorders run"):
             # Redirect to a file rather than piping into grep: grep -q exits as
             # soon as it matches, which closes the pipe and kills the writer with
             # SIGPIPE (exit 141) before it has finished printing help.
             machine.succeed("${recgo}/bin/recgo-tab -h > /tmp/tab-help 2>&1 || true")
             machine.succeed("${recgo}/bin/recgo-browser -h > /tmp/browser-help 2>&1 || true")
             machine.succeed("${recgo}/bin/recgo-desktop -h > /tmp/desktop-help 2>&1 || true")
+            machine.succeed("${recgo}/bin/recgo-window -h > /tmp/window-help 2>&1 || true")
             tab_help = machine.succeed("cat /tmp/tab-help")
             browser_help = machine.succeed("cat /tmp/browser-help")
             desktop_help = machine.succeed("cat /tmp/desktop-help")
+            window_help = machine.succeed("cat /tmp/window-help")
             assert "stt-backend" in tab_help
             assert "Every open tab is recorded" in browser_help, browser_help
             assert "--match or --select pins the" in browser_help, browser_help
@@ -196,12 +198,18 @@ let
             }
             missing = pipeline - flags(desktop_help)
             assert not missing, f"recgo-desktop lacks session-pipeline flags: {missing}"
+            # recgo-window is recgo-desktop pinned to one screen picked at
+            # start: same pipeline, plus the flags that make the pick.
+            only_desktop = flags(desktop_help) - flags(window_help)
+            assert not only_desktop, f"recgo-window lacks recgo-desktop flags: {only_desktop}"
+            assert {"-screen", "-list-screens"} <= flags(window_help), window_help
 
-        with subtest("transcription is local-first on all three"):
+        with subtest("transcription is local-first on every recorder"):
             for name, text in (
                 ("recgo-tab", tab_help),
                 ("recgo-browser", browser_help),
                 ("recgo-desktop", desktop_help),
+                ("recgo-window", window_help),
             ):
                 assert 'default "auto"' in text, f"{name} backend is not auto"
                 assert "nothing leaves this machine" in text, name

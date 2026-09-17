@@ -24,6 +24,9 @@ final class Hotkeys {
         HotkeyAction(name: "Record screen", settingsKey: "shortcutRecordScreen") {
             Actions.start(.screen)
         },
+        HotkeyAction(name: "Record one screen", settingsKey: "shortcutRecordWindow") {
+            Actions.start(.window)
+        },
         HotkeyAction(name: "Record browser", settingsKey: "shortcutRecordBrowser") {
             Actions.start(.browser)
         },
