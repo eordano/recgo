@@ -8,7 +8,7 @@ import (
 )
 
 func TestWhisperArgsIncludeVADWhenAvailable(t *testing.T) {
-	args := whisperArgs("/m/model.bin", "/tmp/a.wav", "/tmp/transcript", "/m/silero.bin")
+	args := whisperArgs("/m/model.bin", "/tmp/a.wav", "/tmp/transcript", "/m/silero.bin", "")
 	joined := strings.Join(args, " ")
 
 	for _, want := range []string{
@@ -22,26 +22,43 @@ func TestWhisperArgsIncludeVADWhenAvailable(t *testing.T) {
 }
 
 func TestWhisperArgsOmitVADWhenAbsent(t *testing.T) {
-	joined := strings.Join(whisperArgs("/m/model.bin", "/tmp/a.wav", "/tmp/t", ""), " ")
+	joined := strings.Join(whisperArgs("/m/model.bin", "/tmp/a.wav", "/tmp/t", "", ""), " ")
 	if strings.Contains(joined, "--vad") {
 		t.Errorf("VAD flags present without a model: %s", joined)
 	}
 	if !strings.Contains(joined, "-ml 1") || !strings.Contains(joined, "-sow") {
 		t.Errorf("word-level flags dropped: %s", joined)
 	}
+	if strings.Contains(joined, "--prompt") {
+		t.Errorf("prompt flag present without a prompt: %s", joined)
+	}
+}
+
+func TestWhisperArgsPassPromptAsOneArgv(t *testing.T) {
+	prompt := "Worth coming back, example.app, Acme · Q4 2026 Plan"
+	args := whisperArgs("/m/model.bin", "/tmp/a.wav", "/tmp/t", "/m/silero.bin", prompt)
+	for i, a := range args {
+		if a == "--prompt" {
+			if i+1 >= len(args) || args[i+1] != prompt {
+				t.Fatalf("--prompt must be followed by the whole prompt: %q", args)
+			}
+			return
+		}
+	}
+	t.Fatalf("no --prompt in %q", args)
 }
 
 func TestTranscribeLocalRefusesWithoutModel(t *testing.T) {
 	c := NewClock()
 	c.SetAudioStart(0, "test")
-	got := TranscribeLocal(c, "/tmp/a.wav", "whisper-cli", "", "")
+	got := TranscribeLocal(c, "/tmp/a.wav", "whisper-cli", "", "", "")
 	if got.OK || !strings.Contains(got.Reason, "no local whisper model") {
 		t.Errorf("reason = %q", got.Reason)
 	}
 }
 
 func TestTranscribeLocalRefusesWithoutAudioAnchor(t *testing.T) {
-	got := TranscribeLocal(NewClock(), "/tmp/a.wav", "whisper-cli", "/m/model.bin", "")
+	got := TranscribeLocal(NewClock(), "/tmp/a.wav", "whisper-cli", "/m/model.bin", "", "")
 	if got.OK || !strings.Contains(got.Reason, "no audio") {
 		t.Errorf("reason = %q", got.Reason)
 	}
@@ -50,7 +67,7 @@ func TestTranscribeLocalRefusesWithoutAudioAnchor(t *testing.T) {
 func TestTranscribeLocalReportsMissingBinary(t *testing.T) {
 	c := NewClock()
 	c.SetAudioStart(0, "test")
-	got := TranscribeLocal(c, "/tmp/a.wav", "/nonexistent/whisper-cli", "/m/model.bin", "")
+	got := TranscribeLocal(c, "/tmp/a.wav", "/nonexistent/whisper-cli", "/m/model.bin", "", "")
 	if got.OK || !strings.Contains(got.Reason, "whisper.cpp failed") {
 		t.Errorf("reason = %q", got.Reason)
 	}

@@ -6,8 +6,13 @@ result-*
 /recgo-browser
 /recgo-desktop
 /recgo-window
+/recgo-android
+/android-helper/build/
 __pycache__/
 .pytest_cache/
 *.pyc
 .env
 vendor/
+/recgo-alttester
+/recgo-sessions
+/recgo-meet-watch

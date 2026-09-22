@@ -1,0 +1,7 @@
+<resources>
+  <string name="service_description">Reports clicked element metadata to an authorized ADB-connected Recgo recorder. Idle until recording starts. Password and editable values are omitted. No network access. Screenshots, video and app logs are separate desktop opt-ins and may contain private information.</string>
+  <item name="demo_button" type="id" />
+  <item name="demo_toggle" type="id" />
+  <item name="demo_password" type="id" />
+  <item name="demo_status" type="id" />
+</resources>

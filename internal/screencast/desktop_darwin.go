@@ -89,6 +89,11 @@ func (d *Desktop) Source() string {
 func (d *Desktop) Frames() int  { return 0 }
 func (d *Desktop) Close() error { return nil }
 
+// FrameStream is false: screencapture takes one screenshot per event, so
+// there is never evidence that the screen did or did not repaint between
+// two.
+func (d *Desktop) FrameStream() bool { return false }
+
 func (d *Desktop) FrameAt(t float64) (string, bool, bool) { return "", false, false }
 
 func (d *Desktop) Snapshot() (image.Image, error) {

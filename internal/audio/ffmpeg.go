@@ -12,10 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/eordano/recgo/internal/logging"
+	"github.com/eordano/recgo/internal/proc"
 )
 
 type RecordingStats struct {
@@ -95,7 +95,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	logging.Log("ffmpeg args: %v", args)
 
 	r.cmd = exec.CommandContext(ctx, "ffmpeg", args...)
-	r.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	proc.Detach(r.cmd)
 
 	stderr, err := r.cmd.StderrPipe()
 	if err != nil {
@@ -236,7 +236,7 @@ func (r *Recorder) Stop() error {
 	r.mu.Unlock()
 
 	if cmd != nil && cmd.Process != nil {
-		cmd.Process.Signal(syscall.SIGINT)
+		proc.Interrupt(cmd.Process)
 
 		select {
 		case <-done:

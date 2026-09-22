@@ -131,7 +131,7 @@ func (v *LiveView) consume() {
 		case e.Kind == "note":
 			v.printf("%s  Note: %s", stamp, oneLine(e.Text))
 		case e.Kind == "navigation":
-			v.printf("%s  Navigate: %s", stamp, e.URL)
+			v.printf("%s  %s", stamp, navigationLine(e))
 		case e.Kind == "tab-switch":
 			v.printf("%s  Tab: %s", stamp, oneLine(FirstNonEmpty(e.Title, e.URL)))
 		case e.Kind == "focus":

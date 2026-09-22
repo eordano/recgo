@@ -15,11 +15,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/eordano/recgo/internal/audio"
 	"github.com/eordano/recgo/internal/logging"
+	"github.com/eordano/recgo/internal/proc"
 )
 
 const (
@@ -190,7 +190,7 @@ func (s *Session) Start() error {
 	}
 	s.setupTmpWav()
 	var args []string
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS != "linux" {
 		args = append(audio.FFmpegInputArgs(s.mic),
 			"-ac", "1", "-ar", fmt.Sprintf("%d", sampleRate),
 			"-f", "s16le",
@@ -207,7 +207,7 @@ func (s *Session) Start() error {
 		}
 	}
 	cmd := exec.CommandContext(s.ctx, "ffmpeg", args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	proc.Detach(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("ffmpeg stdout pipe: %w", err)

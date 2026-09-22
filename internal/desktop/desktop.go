@@ -33,6 +33,35 @@ var shotOffsets = []struct {
 	{"after", 100},
 }
 
+// Extension is how a tool built on this recorder (recgo-alttester) joins
+// the run. Start gets a func that adds a Note line and may refuse to start;
+// ResolveClick runs right after each click event is pushed, off the tap
+// goroutine, and what it returns is merged into the event before Pack.
+type Extension struct {
+	Start        func(note func(string)) error
+	Stop         func()
+	ResolveClick func(x, y float64) (elem *tab.Element, note string)
+}
+
+var extension *Extension
+
+// SetExtension installs the tool's hooks; call it before Main.
+func SetExtension(e *Extension) { extension = e }
+
+// applyResolved merges a resolver's answer into the click event: the
+// element when one was found, the note after any the tap already set.
+func applyResolved(e *tab.Event, el *tab.Element, note string) {
+	if el != nil {
+		e.Elem = el
+	}
+	if note != "" {
+		if e.Note != "" {
+			note = e.Note + "; " + note
+		}
+		e.Note = note
+	}
+}
+
 // Main is the whole CLI: recgo-desktop records every screen, recgo-window
 // one screen (or window) chosen when it starts; everything else is shared.
 func Main(tool string) {
@@ -107,9 +136,13 @@ func Main(tool string) {
 		"keep the finished session on this machine even when a sync target is configured")
 
 	flag.Usage = func() {
-		if window {
+		switch tool {
+		case "recgo-window":
 			fmt.Fprintf(os.Stderr, "recgo-window — record one screen, chosen at start, with narration\n\n")
-		} else {
+		case "recgo-alttester":
+			fmt.Fprintf(os.Stderr, "recgo-alttester — record the screen with narration, naming the Unity UI\n"+
+				"element under every click through the AltTester SDK in the dev build\n\n")
+		default:
 			fmt.Fprintf(os.Stderr, "recgo-desktop — record the screen with narration\n\n")
 		}
 		fmt.Fprintf(os.Stderr, "Usage: %s [flags]\n\n", tool)
@@ -308,6 +341,21 @@ func run(o opts) error {
 	clock := tab.NewClock()
 	rec := tab.NewRecording(clock, provisional)
 
+	// Before the capture is opened: a taken AltTester port is reported before
+	// the portal's picker appears, and the launch hint is on screen while the
+	// person starts the client.
+	ext := extension
+	if ext != nil && ext.Start != nil {
+		if err := ext.Start(func(text string) {
+			rec.Push(tab.Event{T: clock.Now(), Kind: "note", Text: text})
+		}); err != nil {
+			return err
+		}
+	}
+	if ext != nil && ext.Stop != nil {
+		defer ext.Stop()
+	}
+
 	var desk *screencast.Desktop
 	var err error
 	backend := "audio-only"
@@ -332,7 +380,7 @@ func run(o opts) error {
 			return err
 		}
 		defer desk.Close()
-		backend = desk.Backend()
+		backend = captureLabel(desk.Backend(), desk.Source())
 		fmt.Fprintf(os.Stderr, "capturing %s\n", desk.Source())
 	} else if !o.noVideo {
 		tokPath := tokenFile(o.tokenPath)
@@ -354,8 +402,9 @@ func run(o opts) error {
 			os.MkdirAll(filepath.Dir(tokPath), 0o700)
 			os.WriteFile(tokPath, []byte(tok), 0o600)
 		}
-		backend = desk.Backend()
+		backend = captureLabel(desk.Backend(), desk.Source())
 	}
+	frameStream := desk != nil && desk.FrameStream()
 
 	feed := o.liveFeed()
 	var tapFn func([]byte)
@@ -445,6 +494,14 @@ func run(o opts) error {
 				rec.Update(ev, func(e *tab.Event) { e.Note = "right-click" })
 			}
 			shotEvent(ev, t, seq)
+			if ext != nil && ext.ResolveClick != nil {
+				// Shares the in-flight gate with the shots: the answer must
+				// land before the snapshot, and never after the rename.
+				startShot(func() {
+					el, note := ext.ResolveClick(c.X, c.Y)
+					rec.Update(ev, func(e *tab.Event) { applyResolved(e, el, note) })
+				})
+			}
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "click shots disabled: %v\n", err)
@@ -552,6 +609,7 @@ func run(o opts) error {
 	}
 
 	durationMs := clock.Now()
+	rec.Push(tab.Event{T: durationMs, Kind: "record-stop"})
 	wavPath, audioNote := "", ""
 	if mic != nil {
 		res := mic.Stop()
@@ -607,7 +665,7 @@ func run(o opts) error {
 	session, err := tab.Pack(finalDir, events, clock, transcript, tab.Meta{
 		Slug: slug, Title: title, StartedISO: started.UTC().Format(time.RFC3339),
 		StartedWall: started.Format("2006-01-02 15:04:05"),
-		DurationMs:  durationMs, Cwd: cwd, TargetURL: backend,
+		DurationMs:  durationMs, Cwd: cwd, TargetURL: backend, FrameStream: frameStream,
 		Tool: tool, AudioNote: audioNote, TitleNote: titleNote, SystemAudio: systemAudioOf(mic),
 		System: systemInfo(),
 	}, tab.PackOptions{JSON: o.json})
@@ -615,11 +673,24 @@ func run(o opts) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "\nwrote %s/SESSION.md\n", finalDir)
+	fmt.Fprintf(os.Stderr, "\nwrote %s\n", filepath.Join(finalDir, "SESSION.md"))
 	fmt.Fprintf(os.Stderr, "  %d clicks, %d marks, %d utterances\n",
 		session.Counts.Clicks, marks, session.Counts.Utterances)
 	syncSession(o, finalDir)
 	return nil
+}
+
+// captureLabel is the SESSION.md Capture line: the backend plus what it
+// captures (the display picked at start, or the whole desktop). It never
+// names a focused window: on the Windows run the Unity window was the subject
+// and a browser only came to the front at the end, yet the line read
+// "windows-gdi — ... Microsoft Edge". A backend that already names its
+// source (the one-screen modes) is left as is.
+func captureLabel(backend, source string) string {
+	if source == "" || strings.Contains(backend, source) {
+		return backend
+	}
+	return fmt.Sprintf("%s (%s)", backend, source)
 }
 
 // The host may also run a periodic sync over the output root, but the person
@@ -751,7 +822,7 @@ func transcribeWav(o opts, clock *tab.Clock, wavPath string) *tab.Transcript {
 
 	if o.sttBackend == "local" {
 		model, vad := tab.ResolveWhisperModel(o.whisperModel, o.whisperVAD)
-		t := tab.TranscribeLocal(clock, wavPath, o.whisperBin, model, vad)
+		t := tab.TranscribeLocal(clock, wavPath, o.whisperBin, model, vad, "")
 		if t.OK && vad == "" {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", t.AccuracyNote)
 		}

@@ -24,6 +24,12 @@ Initial screenshot: 0001.png
 00.00.03  Error: network 500 http://localhost:5173/api
 00.00.05: legacy narration line
 00.00.06  Click: a → 0003.png — screen did not repaint
+00.00.07  Click: 4,3 on button.save text: Save → 0004.png (×3, through 0006.png) — screen did not repaint
+00.00.08  **user approves**: looks good
+00.00.09  Click: 20,20 → 0005.png — outside ~ — Konsole
+00.00.10  Click: 20,20 → 0006.png — right-click
+00.00.11  Click: 20,20 → 0007.png — outside X — screen did not repaint
+00.00.12  Click: 20,20 → 0008.png — right-click (×2, through 0009.png) — screen did not repaint
 
 ## How this was captured
 
@@ -47,8 +53,13 @@ func setupSession(t *testing.T, fullW, fullH int) string {
 	if err := os.WriteFile(filepath.Join(dir, "SESSION.md"), []byte(fixture), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"0001.png", "0002.png", "0003.png"} {
+	for _, name := range []string{"0001.png", "0002.png", "0003.png", "0004.png"} {
 		writePNG(t, filepath.Join(dir, name), 10, 10)
+	}
+	// The noted desktop clicks: frames big enough that their 20,20 does
+	// not read as a 1x display to annotate's DPR guess.
+	for _, name := range []string{"0005.png", "0006.png", "0007.png", "0008.png"} {
+		writePNG(t, filepath.Join(dir, name), 400, 200)
 	}
 	writePNG(t, filepath.Join(dir, "0002-full.png"), fullW, fullH)
 	return dir
@@ -70,7 +81,7 @@ func TestParseSession(t *testing.T) {
 	for _, ev := range s.Events {
 		kinds = append(kinds, ev.Kind)
 	}
-	want := []string{"narration", "click", "error", "narration", "click"}
+	want := []string{"narration", "click", "error", "narration", "click", "click", "narration", "click", "click", "click", "click"}
 	if len(kinds) != len(want) {
 		t.Fatalf("events: got %v, want %v", kinds, want)
 	}
@@ -94,8 +105,36 @@ func TestParseSession(t *testing.T) {
 	if last.X != nil || last.Sel != "a" || !last.NoRepaint {
 		t.Errorf("click 2: %+v", last)
 	}
+	collapsed := s.Events[5]
+	if collapsed.X == nil || *collapsed.X != 4 || collapsed.Sel != "button.save" || collapsed.Text != "Save" ||
+		collapsed.Img != "0004.png" || collapsed.Count != 3 || collapsed.Through != "0006.png" || !collapsed.NoRepaint {
+		t.Errorf("collapsed click: %+v", collapsed)
+	}
+	approves := s.Events[6]
+	if !approves.Approves || approves.Text != "looks good" {
+		t.Errorf("approval: %+v", approves)
+	}
 
-	if len(s.Frames) != 3 || !s.Frames[0].Start || s.Frames[0].Img != "0001.png" {
+	// Desktop clicks with a note after the image (recgo-alttester's
+	// "outside <window>", any tool's right-click) are still clicks.
+	for i, want := range []struct {
+		img, note string
+		repaint   bool
+		count     int
+	}{
+		{"0005.png", "outside ~ — Konsole", false, 0},
+		{"0006.png", "right-click", false, 0},
+		{"0007.png", "outside X", true, 0},
+		{"0008.png", "right-click", true, 2},
+	} {
+		ev := s.Events[7+i]
+		if ev.X == nil || *ev.X != 20 || *ev.Y != 20 || ev.Img != want.img || ev.Note != want.note ||
+			ev.NoRepaint != want.repaint || ev.Count != want.count || ev.Sel != "" {
+			t.Errorf("noted click %d: %+v, want %+v", i, ev, want)
+		}
+	}
+
+	if len(s.Frames) != 8 || !s.Frames[0].Start || s.Frames[0].Img != "0001.png" || s.Frames[3].Img != "0004.png" || s.Frames[7].Img != "0008.png" {
 		t.Errorf("frames: %+v", s.Frames)
 	}
 }

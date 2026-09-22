@@ -12,6 +12,8 @@
   rsync,
   openssh,
   switchaudio-osx,
+  android-tools,
+  scrcpy,
   makeWrapper,
 }:
 
@@ -80,6 +82,20 @@ stdenvNoCC.mkDerivation rec {
             )
           }
 
+        wrapProgram $out/bin/recgo-android \
+          --prefix PATH : ${
+            lib.makeBinPath (
+              [
+                android-tools
+                scrcpy
+                ffmpeg
+                whisper-cpp
+              ]
+              ++ lib.optional stdenv.hostPlatform.isLinux pulseaudio
+              ++ lib.optional stdenv.hostPlatform.isDarwin switchaudio-osx
+            )
+          }
+
         # recgo-tab additionally drives a browser over CDP and transcribes locally.
         # Chromium and whisper-cpp are runtime deps rather than build ones, and
         # deliberately only PATH fallbacks: --chromium and --whisper-bin let you
@@ -92,7 +108,7 @@ stdenvNoCC.mkDerivation rec {
         # Without it the KDE screenshot path fails with "The process is not
         # authorized to take a screenshot".
         mkdir -p $out/share/applications
-        for tabBin in recgo-tab recgo-browser recgo-desktop recgo-window; do
+        for tabBin in recgo-tab recgo-browser recgo-desktop recgo-window recgo-alttester; do
           cat > $out/share/applications/$tabBin.desktop <<EOF
     [Desktop Entry]
     Type=Application
@@ -103,7 +119,7 @@ stdenvNoCC.mkDerivation rec {
     EOF
         done
 
-        for tabBin in recgo-tab recgo-browser recgo-desktop recgo-window; do
+        for tabBin in recgo-tab recgo-browser recgo-desktop recgo-window recgo-alttester; do
           wrapProgram $out/bin/$tabBin \
             --prefix PATH : ${
               lib.makeBinPath (

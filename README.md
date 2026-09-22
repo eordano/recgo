@@ -5,6 +5,9 @@ VU meters, device switching, and optional Whisper transcription (local or remote
 
 ## Features
 
+Android phones and emulators: [recgo-android](RECGO-ANDROID.md) records tapped
+element metadata, with opt-in screenshots, scrcpy video, app logs and narration.
+
 - **btop-inspired TUI** using Bubbletea + Lipgloss
 - **Multi-source recording** - microphone + system audio (PipeWire/PulseAudio)
 - **Real-time VU meters** with Unicode block visualization
@@ -40,9 +43,10 @@ has no monitor sources.
 | `recgo-desktop` click screenshots | works | macOS: Accessibility (or Input Monitoring) TCC grant; Linux (KDE Plasma): your user in the `input` group (evdev for the press, a KWin script for the pointer position and the window under it); `--click-shots=false` disables |
 | `recgo-desktop` focus/dialog screenshots | works | macOS: rides the Screen Recording grant; Linux (KDE Plasma): a KWin script reports focus changes and new windows; `--focus-shots=false` disables |
 | `recgo-desktop` window capture | unsupported | interactive `-w` mode removed (blocked waiting for a click) |
+| `recgo-alttester` (desktop capture + Unity element under each click) | works on KDE Plasma | same grants as `recgo-desktop`, plus the dev build launched with `--alttester 127.0.0.1:13000` dialing recgo; see [RECGO-ALTTESTER.md](RECGO-ALTTESTER.md) |
 | `recgo-window` (one screen, picked at start) | works | same grants as `recgo-desktop`; `-screen N` (numbers from `-list-screens`, or `main`) skips the terminal prompt, which is how the app passes its picker's choice |
 | `recgo-browser` / `recgo-tab` | works, no TCC | a Chromium-family browser; auto-discovers Chromium/Chrome/Brave/Edge app bundles when `--chromium` is unset |
-| Session default out dir | guarded | Linux: `~/walk-and-talk` (or `[recording] output_dir` from config.toml); macOS: `~/Documents/walk-and-talk`, falling back to `~/walk-and-talk` with a warning when Documents is iCloud-synced (all three session CLIs and the app) |
+| Session default out dir | guarded | Linux and Windows: `~/walk-and-talk` (or `[recording] output_dir` from config.toml); macOS: `~/Documents/walk-and-talk`, falling back to `~/walk-and-talk` with a warning when Documents is iCloud-synced (all three session CLIs and the app) |
 
 ### System audio: BlackHole + Multi-Output Device
 
@@ -95,6 +99,45 @@ record_output_device = "Multi-Output Device"  # "" disables output switching
 [watchdog]
 enabled = true   # silence watchdog re-asserts the output device on recovery
 ```
+
+## Windows
+
+recgo-desktop and recgo-window run on Windows 10/11 from a plain
+cross-compiled `recgo-desktop.exe` (`GOOS=windows GOARCH=amd64 CGO_ENABLED=0
+go build ./cmd/...` — standard library only, no cgo). Audio goes through
+ffmpeg's `dshow` input; the screen through GDI; clicks through a low-level
+mouse hook. Nothing needs a permission prompt.
+
+### Support matrix
+
+| Feature | Status | Needs |
+|---|---|---|
+| `recgo-desktop` mic recording | works | ffmpeg on PATH (`winget install ffmpeg`); the default is the first `dshow` audio device, `-mic "<name>"` picks another (names from `ffmpeg -list_devices true -f dshow -i dummy`) |
+| `recgo-desktop` system audio | needs a loopback device | Windows has no monitor sources: `-system-audio default` takes the sound card's **Stereo Mix** pin if it exists, else a virtual cable (`-system-audio "CABLE Output (VB-Audio Virtual Cable)"`); without one the recorder says so and records the microphone alone |
+| `recgo-desktop` screenshots | works | GDI `BitBlt` of the virtual screen (or the picked display), physical pixels — the process declares per-monitor DPI awareness, so a 125% display captures at 1920x1200, not 1536x960 |
+| `recgo-desktop` click screenshots | works, no permissions | a `WH_MOUSE_LL` hook on a thread of the recorder's own; positions are physical pixels, so they line up with the screenshots directly (`--click-shots=false` disables) |
+| `recgo-desktop` focus/dialog screenshots | works, no permissions | the foreground window is polled every 200ms, the top-level window list every 500ms; a window is named `<class>: <title>` (`--focus-shots=false` disables) |
+| Frame history (`-before` / `-after` shots, `— screen did not repaint`) | absent | like macOS there is no frame pump: each shot is one screenshot at the instant, so the repaint evidence never appears and the `-before` / `-after` siblings carry a note instead of a file |
+| `recgo-window` (one screen, picked at start) | works | `-screen N` from `-list-screens` (EnumDisplayMonitors order), or `main`; one display needs no prompt |
+| `recgo-browser` / `recgo-tab` | works | a Chromium-family browser; Chrome, Edge, Brave and Chromium are auto-discovered under Program Files and LocalAppData when `--chromium` is unset |
+| `recgo` (the TUI) | audio only, degraded | compiles and records through dshow, but the live system-audio toggle, virtual sinks and the default-output watcher are PipeWire/PulseAudio features and report themselves unsupported |
+| Session default out dir | `%USERPROFILE%\walk-and-talk` | or `[recording] output_dir` in `%USERPROFILE%\.config\recgo\config.toml` (XDG layout on Windows too) |
+
+### Interactive session only
+
+A process started from an ssh session, a service or a scheduled task
+without the interactive principal lands in **session 0**, where there is no
+desktop to capture: `recgo-desktop` refuses to start with `screen capture:
+BitBlt: Access is denied. (a service or ssh session has no interactive
+desktop)` rather than record black. Run it from a console or RDP session of
+the logged-in user, or from a scheduled task created by that user.
+
+### Stopping ffmpeg
+
+The recorder starts ffmpeg in its own console process group and stops it with
+`Ctrl-Break`, which ffmpeg treats like `Ctrl-C`; without a console (a hidden
+task) it is killed instead. The microphone path streams raw PCM and writes
+the WAV itself, so a kill loses nothing.
 
 ## Linux (KDE)
 

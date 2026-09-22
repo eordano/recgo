@@ -10,11 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/eordano/recgo/internal/proc"
 )
 
 const fixturePage = `<!doctype html>
@@ -32,6 +33,7 @@ const fixturePage = `<!doctype html>
 <button data-testid="load">Load</button>
 <button data-testid="inert">Does nothing visible</button>
 <div id="status">ready</div>
+<iframe src="/frame" title="embedded frame"></iframe>
 <script>
   const status = document.getElementById('status');
   document.querySelector('[data-testid=save]').addEventListener('click', async () => {
@@ -57,6 +59,34 @@ const fixturePage = `<!doctype html>
   });
 </script>`
 
+// A reveal.js-shaped page: sections that only their index tells apart,
+// cards that classes tell apart, anonymous wrapper divs, hashed and utility
+// classes, a labelled landmark and an id.
+const deckPage = `<!doctype html>
+<meta charset="utf-8">
+<title>Deck fixture</title>
+<style>
+  body { font: 16px system-ui, sans-serif; margin: 0; }
+  section { display: block; padding: 12px; }
+  .card, p, button { display: inline-block; padding: 12px 20px; margin: 6px; border: 1px solid #888; }
+</style>
+<div class="reveal">
+  <div class="slides">
+    <section class="title over-photo"><h1>Cover</h1></section>
+    <section class="over-photo">
+      <div class="cards two">
+        <div class="card"><span class="word">Creators</span></div>
+        <div class="card muted"><span class="word">Leading</span></div>
+      </div>
+    </section>
+    <section>
+      <div><div><p class="lede css-1x2y3z mt-4 active">Wrapped</p></div></div>
+      <nav aria-label="Deck controls"><button>Next</button></nav>
+      <div id="status"><p>ready</p></div>
+    </section>
+  </div>
+</div>`
+
 type fixture struct {
 	server *httptest.Server
 	mu     sync.Mutex
@@ -71,6 +101,18 @@ func newFixture(t *testing.T) *fixture {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.WriteString(w, fixturePage)
+	})
+
+	// A same-site iframe gets inject.js too; its install-time reports must
+	// not read as the user navigating, nor its title become the page's.
+	mux.HandleFunc("/frame", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		io.WriteString(w, `<!doctype html><title>Frame page</title><p>inside the frame</p>`)
+	})
+
+	mux.HandleFunc("/deck", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		io.WriteString(w, deckPage)
 	})
 
 	mux.HandleFunc("/api/documents/4821", func(w http.ResponseWriter, r *http.Request) {
@@ -150,12 +192,12 @@ func launchTestChromium(t *testing.T, bin string, port int) {
 		"--window-size=1280,800",
 		"--headless=new", "--disable-gpu", "--no-sandbox",
 		"about:blank")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	proc.Detach(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("launch chromium: %v", err)
 	}
 	t.Cleanup(func() {
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		proc.KillGroup(cmd.Process)
 		cmd.Wait()
 	})
 
@@ -259,7 +301,46 @@ func TestEndToEnd(t *testing.T) {
 	fx.fire(t, `{"type":"full-reload","path":"/src/main.tsx"}`)
 	time.Sleep(800 * time.Millisecond)
 
+	// reveal.js writes its slide hash with replaceState; a router uses
+	// pushState; a plain anchor changes location.hash. None of them reload.
+	for _, expr := range []string{
+		`history.replaceState(null, '', '#/3')`,
+		`history.replaceState(null, '', '#/3')`,
+		`history.pushState({}, '', '/docs/4821?tab=history')`,
+		`location.hash = '#comments'`,
+	} {
+		if err := cdp.Send("Runtime.evaluate", map[string]any{"expression": expr}, nil); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
+
 	events := rec.Stop()
+
+	var navs []string
+	for _, e := range events {
+		if e.Kind == "navigation" {
+			navs = append(navs, navigationLine(e))
+		}
+	}
+	wantNavs := []string{
+		"Navigate: " + fx.server.URL + "/ — recgo-tab fixture",
+		"Navigate: " + fx.server.URL + "/#/3",
+		"Navigate: " + fx.server.URL + "/docs/4821?tab=history",
+		"Navigate: " + fx.server.URL + "/docs/4821?tab=history#comments",
+	}
+	if strings.Join(navs, "\n") != strings.Join(wantNavs, "\n") {
+		t.Errorf("navigation lines:\n%s\nwant:\n%s", strings.Join(navs, "\n"), strings.Join(wantNavs, "\n"))
+	}
+	if len(events) == 0 || events[0].Kind != "record-start" || events[0].URL != "about:blank" {
+		t.Errorf("record-start should carry the start URL: %+v", events[0])
+	}
+	for _, e := range events {
+		if strings.Contains(e.URL, "/frame") || e.Title == "Frame page" {
+			t.Errorf("the iframe's location leaked into the timeline: %+v", e)
+		}
+	}
 
 	var clicks []Event
 	for _, e := range events {
@@ -393,6 +474,67 @@ func TestEndToEnd(t *testing.T) {
 	for _, f := range []string{"FEEDBACK.md", "AGENT.md", "clock.json"} {
 		if _, err := os.Stat(filepath.Join(outDir, f)); err == nil {
 			t.Errorf("%s should no longer be written", f)
+		}
+	}
+}
+
+func TestSelectorsNameClassesAndLandmarks(t *testing.T) {
+	chromium := os.Getenv("CHROMIUM")
+	if chromium == "" {
+		t.Skip("set CHROMIUM to run the end-to-end test")
+	}
+
+	fx := newFixture(t)
+	const port = 9423
+	launchTestChromium(t, chromium, port)
+
+	cdp, _, err := Attach(port, "")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	defer cdp.Close()
+
+	rec := NewRecorder(cdp, NewClock(), t.TempDir())
+	if _, _, err := rec.Start(); err != nil {
+		t.Fatalf("recorder start: %v", err)
+	}
+	if err := cdp.Send("Page.navigate", map[string]any{"url": fx.server.URL + "/deck"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+
+	cases := []struct{ click, want string }{
+		// classes name the card; the section needs its index because the
+		// cover is an over-photo section too; the walk stops at the section
+		{".card.muted .word", "section.over-photo:nth-of-type(2) > div.cards.two > div.card.muted > span.word"},
+		// hashed, utility and state classes drop; anonymous wrappers are
+		// skipped, so the combinator becomes a descendant one
+		{".lede", "section:nth-of-type(3) p.lede"},
+		// a labelled landmark bounds the path
+		{"nav button", `nav[aria-label="Deck controls"] > button`},
+		// an ancestor id still ends the walk
+		{"#status p", "#status > p"},
+		// the cover: one class is enough to tell it from its siblings
+		{"h1", "section.title.over-photo > h1"},
+	}
+	for _, c := range cases {
+		clickSelector(t, cdp, c.click)
+		time.Sleep(700 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	var got []string
+	for _, e := range rec.Stop() {
+		if e.Kind == "click" && e.Elem != nil {
+			got = append(got, e.Elem.Selector)
+		}
+	}
+	if len(got) != len(cases) {
+		t.Fatalf("captured %d clicks, want %d: %q", len(got), len(cases), got)
+	}
+	for i, c := range cases {
+		if got[i] != c.want {
+			t.Errorf("click on %q: selector %q, want %q", c.click, got[i], c.want)
 		}
 	}
 }

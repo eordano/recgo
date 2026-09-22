@@ -319,3 +319,130 @@ func TestNoEndpointsShipInTheBinary(t *testing.T) {
 		t.Errorf("DefaultTitleEndpoints must stay empty (endpoints come from the config file): %+v", DefaultTitleEndpoints)
 	}
 }
+
+func TestPromptFieldIsSent(t *testing.T) {
+	m := newMockSTT(t)
+	tr := TranscribeFallback(anchoredClock(), testWav(t), STTOptions{
+		Endpoints: []Endpoint{{URL: m.base(), Model: "whisper"}},
+		Prompt:    "Worth coming back, example.app, without fighting the tools",
+	})
+	if !tr.OK {
+		t.Fatalf("not ok: %s", tr.Reason)
+	}
+	if !strings.Contains(m.lastBody, `name="prompt"`) || !strings.Contains(m.lastBody, "without fighting the tools") {
+		t.Errorf("request body missing the prompt field:\n%s", m.lastBody)
+	}
+	if tr.PromptRejected || strings.Contains(tr.AccuracyNote, "rejected") {
+		t.Errorf("prompt was accepted but flagged: %+v", tr)
+	}
+}
+
+func TestNoPromptFieldWhenEmpty(t *testing.T) {
+	m := newMockSTT(t)
+	TranscribeFallback(anchoredClock(), testWav(t), STTOptions{
+		Endpoints: []Endpoint{{URL: m.base(), Model: "whisper"}},
+	})
+	if strings.Contains(m.lastBody, `name="prompt"`) {
+		t.Errorf("empty prompt must not produce a field:\n%s", m.lastBody)
+	}
+}
+
+func TestRejectedPromptRetriesOnceWithoutIt(t *testing.T) {
+	m := newMockSTT(t)
+	m.respond = func(call int) (int, string) {
+		if call == 1 {
+			return 400, `{"detail":[{"loc":["body","prompt"],"msg":"extra fields not permitted"}]}`
+		}
+		return 200, wordResponse
+	}
+	tr := TranscribeFallback(anchoredClock(), testWav(t), STTOptions{
+		Endpoints: []Endpoint{{URL: m.base(), Model: "whisper"}},
+		Prompt:    "Worth coming back, example.app",
+	})
+	if !tr.OK {
+		t.Fatalf("not ok: %s", tr.Reason)
+	}
+	if m.calls != 2 {
+		t.Errorf("made %d calls, want 2", m.calls)
+	}
+	if strings.Contains(m.lastBody, `name="prompt"`) {
+		t.Error("retry still carried the prompt")
+	}
+	if !tr.PromptRejected || !strings.Contains(tr.AccuracyNote, "rejected the vocabulary prompt") {
+		t.Errorf("rejection not recorded: PromptRejected=%v note=%q", tr.PromptRejected, tr.AccuracyNote)
+	}
+	if len(tr.Attempts) != 0 {
+		t.Errorf("a rejected prompt is not an endpoint failure: %+v", tr.Attempts)
+	}
+	if len(tr.Segments) != 14 {
+		t.Errorf("got %d segments from the retry", len(tr.Segments))
+	}
+}
+
+// A long recording goes up in pieces; the prompt is rejected once and the
+// remaining pieces skip it instead of eating a 400 each.
+func TestRejectedPromptIsDroppedForTheRemainingPieces(t *testing.T) {
+	m := newMockSTT(t)
+	promptCalls := 0
+	m.respond = func(int) (int, string) {
+		m.mu.Lock()
+		withPrompt := strings.Contains(m.lastBody, `name="prompt"`)
+		m.mu.Unlock()
+		if withPrompt {
+			promptCalls++
+			return 400, `{"detail":[{"loc":["body","prompt"],"msg":"extra fields not permitted"}]}`
+		}
+		return 200, wordResponse
+	}
+
+	wav := pcmWav((sttMaxPieceSec-sttCutSearchSec)*2 - 100)
+	pieces := len(splitWAV(wav, sttMaxPieceSec, sttCutSearchSec))
+	if pieces < 2 {
+		t.Fatalf("fixture splits into %d piece(s), need at least 2", pieces)
+	}
+	path := filepath.Join(t.TempDir(), "audio.wav")
+	if err := os.WriteFile(path, wav, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := TranscribeFallback(anchoredClock(), path, STTOptions{
+		Endpoints: []Endpoint{{URL: m.base(), Model: "whisper"}},
+		Prompt:    "Worth coming back, example.app",
+	})
+	if !tr.OK {
+		t.Fatalf("not ok: %s", tr.Reason)
+	}
+	if promptCalls != 1 {
+		t.Errorf("the prompt was sent %d times, want once", promptCalls)
+	}
+	if m.calls != pieces+1 {
+		t.Errorf("made %d calls for %d pieces, want %d", m.calls, pieces, pieces+1)
+	}
+	if !tr.PromptRejected {
+		t.Error("rejection not recorded")
+	}
+}
+
+func TestUnrelatedBadRequestDoesNotRetryWithoutPrompt(t *testing.T) {
+	m := newMockSTT(t)
+	m.respond = func(int) (int, string) { return 400, "unsupported file format" }
+	tr := TranscribeFallback(anchoredClock(), testWav(t), STTOptions{
+		Endpoints: []Endpoint{{URL: m.base(), Model: "whisper"}},
+		Prompt:    "Worth coming back",
+	})
+	if tr.OK || m.calls != 1 {
+		t.Errorf("ok=%v calls=%d, want a single failed call", tr.OK, m.calls)
+	}
+}
+
+func TestPromptRejectionOnlyRetriesOnce(t *testing.T) {
+	m := newMockSTT(t)
+	m.respond = func(int) (int, string) { return 400, `{"error":"prompt not supported"}` }
+	tr := TranscribeFallback(anchoredClock(), testWav(t), STTOptions{
+		Endpoints: []Endpoint{{URL: m.base(), Model: "whisper"}},
+		Prompt:    "Worth coming back",
+	})
+	if tr.OK || m.calls != 2 {
+		t.Errorf("ok=%v calls=%d, want exactly one retry then failure", tr.OK, m.calls)
+	}
+}

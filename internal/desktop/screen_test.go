@@ -13,6 +13,23 @@ var twoDisplays = []screencast.DisplayInfo{
 	{W: 2560, H: 1440, PixelW: 2560, PixelH: 1440},
 }
 
+// The Capture line describes the capture source, never the window that
+// happened to be focused last.
+func TestCaptureLabelNamesTheSource(t *testing.T) {
+	for _, c := range []struct{ backend, source, want string }{
+		{"windows-gdi", "desktop", "windows-gdi (desktop)"},
+		{"windows-gdi (display 1, 1536x960, main)", "display 1, 1536x960, main", "windows-gdi (display 1, 1536x960, main)"},
+		{"macos-screencapture", "desktop", "macos-screencapture (desktop)"},
+		{"xdg-portal-screencast + kwin-screenshot2", "desktop, 2560x1440", "xdg-portal-screencast + kwin-screenshot2 (desktop, 2560x1440)"},
+		{"xdg-portal-screencast (screen DP-1, 2560x1440)", "screen DP-1, 2560x1440", "xdg-portal-screencast (screen DP-1, 2560x1440)"},
+		{"audio-only", "", "audio-only"},
+	} {
+		if got := captureLabel(c.backend, c.source); got != c.want {
+			t.Errorf("captureLabel(%q, %q) = %q, want %q", c.backend, c.source, got, c.want)
+		}
+	}
+}
+
 func TestChooseScreenBySpec(t *testing.T) {
 	var out bytes.Buffer
 	d, err := chooseScreen("2", twoDisplays, strings.NewReader(""), &out)

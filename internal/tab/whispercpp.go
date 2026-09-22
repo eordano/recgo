@@ -64,7 +64,7 @@ func DiscoverWhisperModel() (model, vad string) {
 	return model, vad
 }
 
-func whisperArgs(model, wavPath, outBase, vadModel string) []string {
+func whisperArgs(model, wavPath, outBase, vadModel, prompt string) []string {
 	args := []string{
 		"-m", model,
 		"-f", wavPath,
@@ -77,10 +77,15 @@ func whisperArgs(model, wavPath, outBase, vadModel string) []string {
 	if vadModel != "" {
 		args = append(args, "--vad", "--vad-model", vadModel)
 	}
+	if prompt != "" {
+		args = append(args, "--prompt", prompt)
+	}
 	return args
 }
 
-func TranscribeLocal(clock *Clock, wavPath, bin, model, vadModel string) Transcript {
+// TranscribeLocal runs whisper-cli over the WAV; prompt (see Vocabulary) may
+// be empty.
+func TranscribeLocal(clock *Clock, wavPath, bin, model, vadModel, prompt string) Transcript {
 	if bin == "" {
 		bin = "whisper-cli"
 	}
@@ -96,7 +101,7 @@ func TranscribeLocal(clock *Clock, wavPath, bin, model, vadModel string) Transcr
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, bin, whisperArgs(model, wavPath, outBase, vadModel)...)
+	cmd := exec.CommandContext(ctx, bin, whisperArgs(model, wavPath, outBase, vadModel, prompt)...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 

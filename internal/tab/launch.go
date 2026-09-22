@@ -6,8 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/eordano/recgo/internal/proc"
 )
 
 type LaunchOptions struct {
@@ -53,7 +54,7 @@ func LaunchChromium(o LaunchOptions) (*exec.Cmd, string, error) {
 	args = append(args, "about:blank")
 
 	cmd := exec.Command(bin, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	proc.Detach(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
@@ -81,7 +82,7 @@ func LaunchChromium(o LaunchOptions) (*exec.Cmd, string, error) {
 // StopChromium tears down what LaunchChromium started, profile included.
 func StopChromium(cmd *exec.Cmd, profile string) {
 	if cmd != nil && cmd.Process != nil {
-		cmd.Process.Signal(syscall.SIGTERM)
+		proc.Terminate(cmd.Process)
 		cmd.Wait()
 	}
 	if profile != "" {

@@ -186,6 +186,9 @@ def parse_session_doc(text):
                     kind, text_ = EventKind.network, body
                 elif label == "Error":
                     kind, text_ = EventKind.error, body
+                elif label == "Click":
+                    # Android metadata-only sessions deliberately have no image.
+                    kind, text_ = EventKind.click, body
                 elif label.startswith("console."):
                     kind = EventKind.error if label.endswith("error") else EventKind.console
                     text_ = "%s: %s" % (label, body)

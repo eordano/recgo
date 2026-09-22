@@ -4,6 +4,7 @@ package screencast
 
 import (
 	"encoding/binary"
+	"strings"
 	"testing"
 )
 
@@ -26,15 +27,30 @@ func TestParseInputEvent(t *testing.T) {
 	}
 }
 
-func TestWindowDesc(t *testing.T) {
-	for _, c := range []struct{ caption, class, want string }{
-		{"~ — Konsole", "konsole", "~ — Konsole"},
-		{"Settings", "org.kde.systemsettings", "org.kde.systemsettings: Settings"},
-		{"", "firefox", "firefox"},
-		{"", "", "(untitled)"},
-	} {
-		if got := windowDesc(c.caption, c.class); got != c.want {
-			t.Errorf("windowDesc(%q,%q) = %q want %q", c.caption, c.class, got, c.want)
+func TestParseWindowRect(t *testing.T) {
+	r, ok := parseWindowRect(`{"Title":"Decentraland","Class":"unity-explorer","Left":100,"Top":50.5,"Width":1280,"Height":720}`)
+	if !ok || r.Title != "Decentraland" || r.Class != "unity-explorer" || r.Left != 100 || r.Top != 50.5 || r.Width != 1280 || r.Height != 720 {
+		t.Fatalf("parsed %+v %v", r, ok)
+	}
+	if !r.Contains(100, 50.5) || r.Contains(1380, 100) {
+		t.Error("Contains: left/top inclusive, right/bottom exclusive")
+	}
+	for _, raw := range []string{"null", "", "  null ", "{}", `{"Width":0,"Height":10}`, "not json"} {
+		if _, ok := parseWindowRect(raw); ok {
+			t.Errorf("parseWindowRect(%q) accepted", raw)
 		}
+	}
+}
+
+func TestWindowAtScriptCarriesThePoint(t *testing.T) {
+	b := &kwinBridge{name: "dev.eordano.recgo.p1"}
+	s := windowAtScript(b, 812.5, 340)
+	for _, want := range []string{"windowAt(812.5, 340)", `"WindowAt"`, "stackingOrder", "clientGeometry"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("script lacks %q:\n%s", want, s)
+		}
+	}
+	if !strings.Contains(cursorScript(b), "windowAt(p.x, p.y)") {
+		t.Error("the per-click cursor script should also report the window under the pointer")
 	}
 }

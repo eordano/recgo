@@ -238,6 +238,14 @@ type bridgeObj struct {
 	onWindow func(string)
 	cursor   chan cursorReport
 	screens  chan string
+	winAt    chan string
+
+	// The window under the pointer at the last click, so WindowAt for that
+	// click costs no second KWin round trip.
+	lastWin   WindowRect
+	lastWinOK bool
+	lastX     float64
+	lastY     float64
 }
 
 type cursorReport struct {
@@ -245,14 +253,80 @@ type cursorReport struct {
 	caption string
 }
 
-func (o *bridgeObj) Cursor(x, y, caption string) *dbus.Error {
+func (o *bridgeObj) Cursor(x, y, caption, window string) *dbus.Error {
 	fx, _ := strconv.ParseFloat(x, 64)
 	fy, _ := strconv.ParseFloat(y, 64)
+	rect, ok := parseWindowRect(window)
+	o.mu.Lock()
+	o.lastWin, o.lastWinOK, o.lastX, o.lastY = rect, ok, fx, fy
+	o.mu.Unlock()
 	select {
 	case o.cursor <- cursorReport{fx, fy, caption}:
 	default:
 	}
 	return nil
+}
+
+func (o *bridgeObj) WindowAt(raw string) *dbus.Error {
+	select {
+	case o.winAt <- raw:
+	default:
+	}
+	return nil
+}
+
+// parseWindowRect decodes what windowAtJS reports: a JSON object, or
+// "null" when nothing is under the point.
+func parseWindowRect(raw string) (WindowRect, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" {
+		return WindowRect{}, false
+	}
+	var r WindowRect
+	if json.Unmarshal([]byte(raw), &r) != nil || r.Width <= 0 || r.Height <= 0 {
+		return WindowRect{}, false
+	}
+	return r, true
+}
+
+// WindowAt is the window under (x, y) in workspace points: the cached
+// answer from the click that just reported this position, else a one-shot
+// KWin script. Compositors other than KWin answer false.
+func WindowAt(x, y float64) (WindowRect, bool) {
+	bridge, err := openBridge()
+	if err != nil {
+		return WindowRect{}, false
+	}
+	defer bridge.close()
+	return bridge.windowAt(x, y, 400*time.Millisecond)
+}
+
+func (b *kwinBridge) windowAt(x, y float64, timeout time.Duration) (WindowRect, bool) {
+	b.obj.mu.Lock()
+	if b.obj.lastWinOK && b.obj.lastX == x && b.obj.lastY == y {
+		rect := b.obj.lastWin
+		b.obj.mu.Unlock()
+		return rect, true
+	}
+	b.obj.mu.Unlock()
+
+	b.cursorMu.Lock()
+	defer b.cursorMu.Unlock()
+	for len(b.obj.winAt) > 0 {
+		<-b.obj.winAt
+	}
+	unload, err := b.loadScript("recgo-winat", windowAtScript(b, x, y))
+	if err != nil {
+		logging.Log("winat: %v", err)
+		return WindowRect{}, false
+	}
+	defer unload()
+	select {
+	case raw := <-b.obj.winAt:
+		return parseWindowRect(raw)
+	case <-time.After(timeout):
+		return WindowRect{}, false
+	}
 }
 
 func (o *bridgeObj) Focus(caption, class string) *dbus.Error {
@@ -281,20 +355,6 @@ func (o *bridgeObj) Screens(raw string) *dbus.Error {
 	default:
 	}
 	return nil
-}
-
-func windowDesc(caption, class string) string {
-	caption = strings.TrimSpace(caption)
-	class = strings.TrimSpace(class)
-	switch {
-	case caption == "" && class == "":
-		return "(untitled)"
-	case class == "" || strings.Contains(strings.ToLower(caption), strings.ToLower(class)):
-		return caption
-	case caption == "":
-		return class
-	}
-	return class + ": " + caption
 }
 
 type kwinBridge struct {
@@ -329,7 +389,7 @@ func openBridge() (*kwinBridge, error) {
 		conn.Close()
 		return nil, fmt.Errorf("KWin is not on the session bus (only the KDE Plasma session is supported)")
 	}
-	obj := &bridgeObj{cursor: make(chan cursorReport, 1), screens: make(chan string, 1)}
+	obj := &bridgeObj{cursor: make(chan cursorReport, 1), screens: make(chan string, 1), winAt: make(chan string, 1)}
 	if err := conn.Export(obj, bridgePath, bridgeIface); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("export: %w", err)
@@ -434,9 +494,36 @@ func (b *kwinBridge) cursor(timeout time.Duration) ([2]float64, string, bool) {
 }
 
 func cursorScript(b *kwinBridge) string {
-	return `var p = workspace.cursorPos;
+	return windowAtJS + `var p = workspace.cursorPos;
 var w = workspace.activeWindow;
-` + b.call("Cursor", "String(p.x)", "String(p.y)", "w && w.caption ? String(w.caption) : \"\"") + ";\n"
+` + b.call("Cursor", "String(p.x)", "String(p.y)", "w && w.caption ? String(w.caption) : \"\"", "windowAt(p.x, p.y)") + ";\n"
+}
+
+// windowAtJS finds the topmost window under a point (stackingOrder is
+// bottom to top, so the last hit wins) and reports its client geometry;
+// Plasma 5 names the properties differently, hence the fallbacks.
+const windowAtJS = `function windowAt(x, y) {
+    var list = workspace.stackingOrder || workspace.windowList && workspace.windowList() || workspace.clientList && workspace.clientList() || [];
+    var best = null;
+    for (var i = 0; i < list.length; i++) {
+        var w = list[i];
+        if (!w || w.minimized || w.desktopWindow) continue;
+        if (w.caption && (String(w.caption).indexOf("Recgo HUD") === 0 || String(w.caption).indexOf("Recgo Live") === 0)) continue;
+        if (typeof w.onCurrentDesktop === "boolean" && !w.onCurrentDesktop) continue;
+        var g = w.frameGeometry || w.geometry;
+        if (!g) continue;
+        if (x >= g.x && y >= g.y && x < g.x + g.width && y < g.y + g.height) best = w;
+    }
+    if (!best) return "null";
+    var c = best.clientGeometry || best.frameGeometry || best.geometry;
+    return JSON.stringify({ Title: best.caption ? String(best.caption) : "", Class: best.resourceClass ? String(best.resourceClass) : "",
+        Left: c.x, Top: c.y, Width: c.width, Height: c.height });
+}
+`
+
+func windowAtScript(b *kwinBridge, x, y float64) string {
+	return windowAtJS + b.call("WindowAt", fmt.Sprintf("windowAt(%s, %s)",
+		strconv.FormatFloat(x, 'f', -1, 64), strconv.FormatFloat(y, 'f', -1, 64))) + ";\n"
 }
 
 func watchScript(b *kwinBridge) string {

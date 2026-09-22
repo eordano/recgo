@@ -21,6 +21,11 @@
             mainProgram = "recgo-tab";
           };
         });
+        recgo-android = recgo.overrideAttrs (old: {
+          meta = old.meta // {
+            mainProgram = "recgo-android";
+          };
+        });
         recgo-desktop = recgo.overrideAttrs (old: {
           meta = old.meta // {
             mainProgram = "recgo-desktop";
@@ -29,6 +34,11 @@
         recgo-window = recgo.overrideAttrs (old: {
           meta = old.meta // {
             mainProgram = "recgo-window";
+          };
+        });
+        recgo-alttester = recgo.overrideAttrs (old: {
+          meta = old.meta // {
+            mainProgram = "recgo-alttester";
           };
         });
         default = recgo;

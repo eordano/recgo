@@ -8,7 +8,7 @@ SAMPLE = """# Session: login popup dismisses on its own
 
 Start: 2026-08-27 23:58:22
 Folder: /home/user/src/acme
-Page: https://dcl.one/play/ — Decentraland (BEVY)
+Page: https://example.app/play/ — Example (BEVY)
 Capture: xdg-portal-screencast + kwin-screenshot2
 Host: workstation · NixOS
 Displays: 2560x1440
@@ -62,6 +62,20 @@ def test_scan_library_skips_provisional(tmp_path):
     sessions = scan_library(str(tmp_path))
     assert [s.id for s in sessions] == ["2026-09-04-10-00-hello"]
     assert sessions[0].meta == "23:58 · 01:22 · tab · 5 shots · 2 errors · 1 mark"
+
+
+def test_android_metadata_and_delayed_screenshot():
+    doc = parse_session_doc("""# Session: Android com.example.app
+Recorded 12s by recgo-android
+00.00.01  Click: com.example.app:id/button
+00.00.02  Click: Test toggle (capture started 123 ms after event) → 0002.png
+00.00.03  Click: long press: unknown target (Android did not expose a node)
+""")
+    assert doc.tool == "recgo-android" and doc.duration_sec == 12
+    assert [event.kind for event in doc.events] == [EventKind.click] * 3
+    assert doc.events[0].img is None
+    assert doc.events[1].img == "0002.png"
+    assert doc.events[1].x is None and doc.events[1].y is None
 
 
 def test_waveform_bins(tmp_path):

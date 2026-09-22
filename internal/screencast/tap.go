@@ -8,6 +8,20 @@ type Click struct {
 	Button int // 1 left, 2 right
 }
 
+// WindowRect is the window under a point: its title and class, and its
+// CLIENT area (no frame or title bar) in the same global points the click
+// tap reports. WindowAt (per platform) returns it, or false when the
+// compositor cannot say.
+type WindowRect struct {
+	Title, Class             string
+	Left, Top, Width, Height float64
+}
+
+// Contains reports whether (x, y) falls inside the client area.
+func (r WindowRect) Contains(x, y float64) bool {
+	return x >= r.Left && y >= r.Top && x < r.Left+r.Width && y < r.Top+r.Height
+}
+
 // DisplayInfo is one attached display: bounds in points, active mode in
 // pixels, whether it is the main display, and the compositor's name for it
 // (empty where the platform has none).

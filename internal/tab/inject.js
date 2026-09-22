@@ -12,12 +12,23 @@
   if (window.__rtInstalled) return;
   window.__rtInstalled = true;
 
+  // The script is installed in every frame of the page, and the binding is
+  // context-less, so an iframe reports through the same channel as the top
+  // document. Its location is not where the user is: the recorder keeps a
+  // frame's clicks but takes navigation and visibility from the top frame.
+  let isTop = true;
+  try {
+    isTop = window === window.top;
+  } catch {
+    isTop = false;
+  }
+
   const emit = (payload) => {
     try {
       // The binding is installed by Runtime.addBinding; if injection races
       // ahead of it, drop the event rather than throwing inside the page.
       if (typeof window.__rtEmit === 'function') {
-        window.__rtEmit(JSON.stringify(payload));
+        window.__rtEmit(JSON.stringify({ top: isTop, ...payload }));
       }
     } catch {
       /* never let instrumentation break the app under test */
@@ -25,7 +36,40 @@
   };
 
   // A selector stable enough to hand an LLM. Preference order matches what a
-  // developer would actually grep for in the codebase.
+  // developer would actually grep for in the codebase: a test id or id on the
+  // element itself, else a short path of named ancestors. Classes name the
+  // thing; nth-of-type only where the classes do not tell siblings apart;
+  // anonymous wrappers (no id, no meaningful class, no role) are skipped, and
+  // the walk stops at the first id or landmark, since a region already
+  // bounds where the control is.
+  const STATE_CLASSES = new Set([
+    'active', 'hover', 'focus', 'focused', 'visible', 'hidden', 'present', 'past',
+    'future', 'fragment', 'current', 'selected', 'open', 'closed', 'disabled',
+    'enabled', 'checked', 'expanded', 'collapsed', 'loading', 'loaded', 'stack',
+    'flex', 'grid', 'block', 'inline', 'relative', 'absolute', 'fixed', 'sticky',
+    'container', 'wrapper', 'inner', 'outer',
+  ]);
+  const meaningfulClasses = (el) => {
+    const raw = typeof el.className === 'string' ? el.className : '';
+    const out = [];
+    for (const c of raw.trim().split(/\s+/)) {
+      if (!c || c.length < 3) continue;
+      if (/[\d:\/\[\]!]/.test(c)) continue; // hashed (css-1x2y), utilities (mt-4, md:flex, w-1/2)
+      if (/^(is|has|js)-/.test(c) || STATE_CLASSES.has(c)) continue;
+      out.push(c);
+      if (out.length === 2) break;
+    }
+    return out;
+  };
+  const LANDMARKS = new Set(['main', 'nav', 'form', 'dialog', 'section', 'article',
+    'aside', 'header', 'footer', 'table']);
+  const attrPart = (el) => {
+    for (const attr of ['role', 'aria-label']) {
+      const v = el.getAttribute?.(attr);
+      if (v) return `[${attr}="${v.replace(/["\\]/g, '\\$&')}"]`;
+    }
+    return '';
+  };
   const selectorFor = (el) => {
     if (!(el instanceof Element)) return null;
 
@@ -36,23 +80,44 @@
     if (el.id) return `#${CSS.escape(el.id)}`;
 
     const parts = [];
+    let skipped = false;
+    // A skipped wrapper between two named parts turns the child combinator
+    // into a descendant one, so the path stays a valid selector.
+    const emit = (part) => {
+      parts.unshift(parts.length ? part + (skipped ? ' ' : ' > ') : part);
+      skipped = false;
+    };
     let node = el;
-    while (node && node.nodeType === 1 && parts.length < 6) {
+    while (node && node.nodeType === 1 && parts.length < 4) {
       if (node.id) {
-        parts.unshift(`#${CSS.escape(node.id)}`);
+        emit(`#${CSS.escape(node.id)}`);
         break;
       }
       const tag = node.tagName.toLowerCase();
-      const parent = node.parentElement;
-      if (!parent) {
-        parts.unshift(tag);
-        break;
+      const classes = meaningfulClasses(node);
+      const attr = attrPart(node);
+      const landmark = LANDMARKS.has(tag) || attr !== '';
+      if (node !== el && !classes.length && !landmark) {
+        skipped = true;
+        node = node.parentElement;
+        continue;
       }
-      const siblings = [...parent.children].filter((c) => c.tagName === node.tagName);
-      parts.unshift(siblings.length > 1 ? `${tag}:nth-of-type(${siblings.indexOf(node) + 1})` : tag);
+      let part = tag + classes.map((c) => '.' + CSS.escape(c)).join('') + attr;
+      const parent = node.parentElement;
+      if (parent) {
+        const twins = [...parent.children].filter(
+          (c) => c !== node && c.tagName === node.tagName && node.matches(part) && c.matches(part),
+        );
+        if (twins.length) {
+          const same = [...parent.children].filter((c) => c.tagName === node.tagName);
+          part += `:nth-of-type(${same.indexOf(node) + 1})`;
+        }
+      }
+      emit(part);
+      if (landmark || !parent) break;
       node = parent;
     }
-    return parts.join(' > ');
+    return parts.join('');
   };
 
   const describe = (el) => {
@@ -150,14 +215,55 @@
     { capture: true, passive: true },
   );
 
-  addEventListener('popstate', () => {
-    emit({
-      kind: 'navigation',
-      timeOrigin: performance.timeOrigin,
-      pageTime: performance.now(),
-      url: location.href,
-    });
-  });
+  // reveal.js and most SPA routers write the URL with history.pushState /
+  // replaceState, which fire neither popstate nor hashchange, so the History
+  // methods are wrapped too. The report is deferred a tick so a title the app
+  // sets right after the URL is on the same line; the recorder drops reports
+  // whose URL did not change, so the overlapping sources cost nothing.
+  const reportNavigation = () => {
+    const pageTime = performance.now();
+    setTimeout(() => {
+      emit({
+        kind: 'navigation',
+        timeOrigin: performance.timeOrigin,
+        pageTime,
+        url: location.href,
+        title: document.title,
+      });
+    }, 0);
+  };
+  for (const method of ['pushState', 'replaceState']) {
+    const original = History.prototype[method];
+    if (typeof original !== 'function') continue;
+    History.prototype[method] = function (...args) {
+      const result = original.apply(this, args);
+      reportNavigation();
+      return result;
+    };
+  }
+  addEventListener('popstate', reportNavigation);
+  addEventListener('hashchange', reportNavigation);
+
+  // A fresh document reports itself before its <title> is parsed, and apps
+  // set the title after the URL: report again once the head exists and
+  // whenever the title changes. The recorder attaches the first title it sees
+  // to the navigation it belongs to.
+  const watchTitle = () => {
+    reportNavigation();
+    if (!document.head || typeof MutationObserver !== 'function') return;
+    let last = document.title;
+    new MutationObserver(() => {
+      if (document.title !== last) {
+        last = document.title;
+        reportNavigation();
+      }
+    }).observe(document.head, { childList: true, subtree: true, characterData: true });
+  };
+  if (document.readyState === 'loading') {
+    addEventListener('DOMContentLoaded', watchTitle);
+  } else {
+    watchTitle();
+  }
 
   // Which tab the user is looking at. CDP's /json/list cannot answer this, but
   // the page can: only the foreground tab of a focused window is "visible". This

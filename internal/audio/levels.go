@@ -7,16 +7,16 @@ import (
 	"io"
 	"math"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/eordano/recgo/internal/logging"
+	"github.com/eordano/recgo/internal/proc"
 )
 
 func NewLevelMonitor(ctx context.Context, sourceName string) (*LevelMonitor, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	cmd := levelCmd(ctx, sourceName)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	proc.Detach(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

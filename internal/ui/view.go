@@ -292,7 +292,7 @@ func (m Model) renderTranscript() string {
 const transcriptMaxLines = 3
 
 // badgeWithSpeaker labels a track badge with the speaker speaches last
-// identified on it ("S · Esteban"); an unidentified track keeps the bare badge.
+// identified on it ("S · Alice"); an unidentified track keeps the bare badge.
 func badgeWithSpeaker(badge, speaker string) string {
 	if speaker == "" {
 		return badge

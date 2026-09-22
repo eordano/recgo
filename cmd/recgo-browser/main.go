@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -369,7 +370,7 @@ func run(o options) error {
 	if wavPath != "" && o.sttBackend != "none" {
 		fmt.Fprintln(os.Stderr, "transcribing audio...")
 	}
-	transcript := transcribeWav(o, clock, wavPath)
+	transcript := transcribeWav(o, clock, wavPath, events, pinnedTitle)
 	if transcript != nil && !transcript.OK {
 		fmt.Fprintf(os.Stderr, "transcription: %s\n", transcript.Reason)
 	}
@@ -411,7 +412,7 @@ func run(o options) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "\nwrote %s/SESSION.md\n", finalDir)
+	fmt.Fprintf(os.Stderr, "\nwrote %s\n", filepath.Join(finalDir, "SESSION.md"))
 	fmt.Fprintf(os.Stderr, "  %d clicks, %d HMR, %d errors, %d utterances across %d tab(s)\n",
 		session.Counts.Clicks, session.Counts.HMR, session.Counts.Errors,
 		session.Counts.Utterances, countTabs(events))
@@ -530,7 +531,7 @@ func titleFor(o options, transcript *tab.Transcript, events []tab.Event) tab.Tit
 	}, transcript, events)
 }
 
-func transcribeWav(o options, clock *tab.Clock, wavPath string) *tab.Transcript {
+func transcribeWav(o options, clock *tab.Clock, wavPath string, events []tab.Event, title string) *tab.Transcript {
 	switch o.sttBackend {
 	case "none":
 		return &tab.Transcript{Reason: "transcription disabled (--stt-backend none)"}
@@ -543,9 +544,14 @@ func transcribeWav(o options, clock *tab.Clock, wavPath string) *tab.Transcript 
 		return &tab.Transcript{Reason: "no audio was captured"}
 	}
 
+	prompt := tab.Vocabulary(events, title)
+	if prompt != "" {
+		fmt.Fprintf(os.Stderr, "stt: vocabulary hint, %d terms\n", strings.Count(prompt, ", ")+1)
+	}
+
 	if o.sttBackend == "local" {
 		model, vad := tab.ResolveWhisperModel(o.whisperModel, o.whisperVADModel)
-		t := tab.TranscribeLocal(clock, wavPath, o.whisperBin, model, vad)
+		t := tab.TranscribeLocal(clock, wavPath, o.whisperBin, model, vad, prompt)
 		if t.OK && vad == "" {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", t.AccuracyNote)
 		}
@@ -562,7 +568,7 @@ func transcribeWav(o options, clock *tab.Clock, wavPath string) *tab.Transcript 
 	key := tab.APIKey(o.sttKey, o.cfgKey)
 
 	t := tab.TranscribeFallback(clock, wavPath, tab.STTOptions{
-		Endpoints: eps, Model: o.sttModel, APIKey: key, Language: o.sttLanguage,
+		Endpoints: eps, Model: o.sttModel, APIKey: key, Language: o.sttLanguage, Prompt: prompt,
 	})
 	if !t.OK {
 		return &t

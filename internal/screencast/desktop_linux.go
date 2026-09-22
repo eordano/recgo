@@ -140,6 +140,11 @@ func (d *Desktop) Snapshot() (image.Image, error) {
 
 func (d *Desktop) Frames() int { return d.pump.Count() }
 
+// FrameStream reports that frames arrive continuously from the portal
+// pump, one per screen change, so an unchanged frame is evidence that
+// nothing repainted.
+func (d *Desktop) FrameStream() bool { return true }
+
 func (d *Desktop) Close() error {
 	err := d.pump.Stop()
 	if d.conn != nil {

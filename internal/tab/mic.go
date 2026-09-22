@@ -11,10 +11,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/eordano/recgo/internal/audio"
+	"github.com/eordano/recgo/internal/proc"
 )
 
 const (
@@ -109,7 +109,7 @@ func StartMic(o MicOptions) (*Mic, error) {
 	}
 
 	m.cmd = exec.Command(o.FFmpegBin, micFFmpegArgs(device, m.monitor)...)
-	m.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	proc.Detach(m.cmd)
 
 	stdout, err := m.cmd.StdoutPipe()
 	if err != nil {
@@ -228,7 +228,7 @@ func (m *Mic) Stop() MicResult {
 		return MicResult{Err: fmt.Errorf("mic never started")}
 	}
 
-	m.cmd.Process.Signal(syscall.SIGINT)
+	proc.Interrupt(m.cmd.Process)
 	select {
 	case <-m.done:
 	case <-time.After(5 * time.Second):

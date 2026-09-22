@@ -36,37 +36,116 @@ One chronological stream, narration and events on the same clock:
 Start: 2026-04-30 15:23:23
 Folder: /home/user/src/acme
 Page: http://localhost:5173/ — Acme dashboard
-Recorded 47s by recgo-tab · 6 clicks · 2 errors · 14 utterances
+Recorded 47s by recgo-tab · 8 clicks · 2 errors · 14 utterances
 
 Initial screenshot: 0001.png
-00.00.01: Ok, so when we see this tab
+00.00.01  **user narration**: Ok, so when we see this tab [→0002.png] we see the new login tab, but when i click
 00.00.03  Click: 34,23 on a#header-login text: Log in → 0002.png
-00.00.04: we see the new login tab, but when i click
 00.00.06  Click: 830,200 on button.modal__close → 0003.png — screen did not repaint
 00.00.06  Error: network 500 http://localhost:5173/api/session
-00.00.06: the pop up gets dismissed with no clear feedback
+00.00.06  **user narration**: the pop up gets dismissed with no clear feedback
+00.00.09  console.log: render pass (×3)
+00.00.12  Navigate: http://localhost:5173/#/settings — Settings · Acme dashboard
+00.00.14  Click: 412,300 on button.save text: Save → 0004.png (×3, through 0006.png) — screen did not repaint
+00.00.19  Navigate: http://localhost:5173/#/settings/billing
+00.00.21  **user approves**: ok this looks good
+00.00.47  Stop: recording ended
 ```
 
-Times are `HH.MM.SS` since recording started. Narration lines carry a colon;
-event lines name what happened. `— screen did not repaint` means all three
-screencast frames around the click were the same frame: positive evidence
-nothing on screen changed, not a missing capture.
+Times are `HH.MM.SS` since recording started. Narration lines carry a
+`**user narration**:` (or `**user approves**:`) tag; event lines name what
+happened: `Click:`, `Mark:`, `Focus:`, `Window:`, `Error:`, `console.log:`,
+`Navigate:`, `Note:`, `Tab:`, `HMR:`, and one closing `Stop: recording ended`.
+Recording start is the header and the initial screenshot, not a line. `— screen
+did not repaint` means all three screencast frames around the click were the
+same frame: positive evidence nothing on screen changed, not a missing capture.
 
 The image a click line points at is the frame *at* the click, named for the
 click and nothing else: `0002.png`. Its `-before.png` / `-after.png` siblings are
 the -100ms / +100ms frames and `-full.png` is a full-resolution capture; they
 stay on disk without cluttering the line.
 
-Console output appears inline as `console.log:` / `console.warn:`; consecutive
-identical lines collapse to one with a `(×3)` count. A `Failed to load resource`
-browser log is dropped when the matching request failure is already on the line
-above it. HMR payloads and clock error bounds are not in the document: the raw
-websocket frames are named in the closing block when there are any, and the
-clock measurements go to `session.json` under `--json`.
+**Narration is kept whole across clicks.** Transcript segments are merged
+into one line while the gap between them is under 1.5s and the merged text
+stays under 400 characters; an error, console line, navigation, note, tab
+switch or HMR payload between two segments still splits them. A click, mark,
+focus or window event does *not* split the sentence: it is anchored inline at
+the word it fell on, as `[→0002.png]` when the event has a screenshot, or
+`[click 3]` / `[mark 3]` / `[focus 3]` / `[window 3]` (the event number) when it
+has none. The anchor sits before the first word spoken at or after the event,
+so "let's de-emphasize [→0008.png] this" tells a reader what "this" was. Only
+events that fall strictly after the line's first word and no later than its
+last word are inlined; an event at or before the first word stays on its own
+line just before the sentence. The merged line is stamped at its first word,
+and every anchored click keeps its own `Click:` line after the sentence, so the
+screenshot and the repaint evidence are never lost.
 
-The session name comes from an LLM reading the narration
-(`--title-backend remote`, which uploads the transcript). Without it the name is
-derived from the most-clicked element, as before.
+**Repeated clicks that changed nothing collapse.** Consecutive `Click:` lines
+on the same control (element ref plus label; position only on the desktop
+recorders, where there is no element) that all carry `— screen did not
+repaint` collapse into the first one, with `(×N, through 0006.png)` spliced in
+before the repaint note: `N` clicks, `0006.png` the last collapsed click's
+screenshot. A click that repainted, a click elsewhere, or narration between two
+clicks ends the run. Other consecutive identical lines (console output) still
+collapse to a bare `(×3)`. A `Failed to load resource` browser log is dropped
+when the matching request failure is already on the line above it.
+
+**A short verdict is tagged `**user approves**:`** instead of
+`**user narration**:` when the line is at most 12 words, contains one of
+"this is great", "looks great", "looks good", "love it", "i love", "perfect",
+"this is good", "keep this", "amazing" or "great", and contains none of the
+change words `drop remove change make replace let's add move fix instead reduce
+less more but rename highlight center update` as a whole word. "This is great,
+but make the title bigger" is narration; "ok this looks good" is approval.
+
+**Navigate lines.** Every URL change the page reports is one
+`Navigate: <url>` line: cross-document loads and same-document changes alike,
+including hash-only changes and `pushState` / `replaceState` (SPAs, reveal.js
+decks flipping slides). The page-side hooks wrap the History API and listen to
+`hashchange` / `popstate`; one URL change reported by several sources is
+deduplicated to one line. ` — <title>` is appended only when the title differs
+from the previous one, so a deck with a constant title shows bare URLs and an
+app that sets its title after the URL gets the first title seen after the
+navigation attached to that line. reveal.js debounces `replaceState` to one per
+second, so flipping slides faster than that legitimately yields one line for
+the last slide. The `Page:` header pairs the URL the tab had when recgo-tab
+attached with the last title seen during the session.
+
+HMR payloads and clock error bounds are not in the document: the raw websocket
+frames are named in the closing block when there are any, and the clock
+measurements go to `session.json` under `--json`.
+
+**Session name.** With `--title-backend remote` an LLM reads the narration
+(and the transcript is uploaded). Without it the folder is named from the page
+title of the first record-start, click, navigation or tab-switch event that
+carries one (a `--launch` session starts at `about:blank`, so the navigation
+into the page is what names it), with the site-name half stripped: the title is split at ` — `, ` · `, ` | ` or ` - `,
+the end with fewer words goes (the trailing one on a tie), and only when at
+least three words remain — "Acme · Q4 2026 Plan — Worth coming back"
+becomes `q4-2026-pillars-worth-coming-back`. With no page title the name is the
+most-clicked element's label, then `session`; `-N-errors` is appended when
+errors were recorded, and the title half is what gets clipped to keep the
+whole under 48 characters.
+
+**The batch STT pass is seeded with the page's vocabulary.** Before the final
+transcription `recgo-tab` and `recgo-browser` distill what the recorder saw —
+every event title and the text, `aria-label` and `data-testid` of every clicked
+element, plus the tab title — into a decoder prompt: each string is split into
+clauses at separator glyphs (`· • — – - | / →` and the like) and at sentence
+punctuation, each clause is chunked into runs of at most 6 words, fragments
+shorter than 3 characters or without a letter ("2026", "$200", "≥") are
+dropped, duplicates are merged case-insensitively, and terms are ordered by
+ascending frequency (whisper reads the tail of a prompt, so the most frequent
+term — the page title, which rides on every click — comes last) and cut from
+the front to 900 bytes. stderr says `stt: vocabulary hint, N terms`. With
+`--stt-backend local` it is passed as `whisper-cli --prompt`; with `remote` it
+is the `prompt` multipart field of the batch request, sent to the same endpoint
+as the audio. An endpoint that answers 400 with a body mentioning "prompt" is
+retried once without it and the remaining pieces of that file skip it too
+(`stt: <endpoint> rejects the vocabulary prompt, retrying without it`); the
+transcript then carries `promptRejected: true` in `session.json` and a sentence
+in its `accuracyNote`. The retry is not counted as an endpoint attempt.
+`recgo-desktop` sends no hint, and the live preview is not seeded.
 
 ## Watching it build
 
@@ -145,7 +224,18 @@ room went quiet. `stderr` echoes `system audio: off|on`. The closing block of
 
 - **Clicks with element identity** — `[data-testid="save"] — "Save"`, not
   `left click at (840, 291)`. An in-page listener reports through a CDP binding,
-  so no OS input permissions are needed on either platform. On Wayland that
+  so no OS input permissions are needed on either platform. Without a test id
+  or id on the control itself, the selector is a short path of named
+  ancestors, what a developer would grep for:
+  `section.over-photo:nth-of-type(2) > div.cards.two > div.card.muted > span.word`.
+  Classes name each part (up to two; hashed, utility and state classes such
+  as `css-1x2y3z`, `mt-4`, `active` are dropped), `:nth-of-type(n)` appears
+  only where a sibling carries the same tag and classes, anonymous wrappers
+  are skipped (the combinator then becomes a descendant space), and the walk
+  stops at the first id or landmark (`main`, `nav`, `form`, `dialog`,
+  `section`, `article`, `aside`, `header`, `footer`, `table`, or anything with
+  a `role` or `aria-label`, which is spelled out: `nav[aria-label="Deck
+  controls"] > button`). At most four parts. On Wayland that
   matters: passive global input capture is not available at all (the
   `InputCapture` portal is exclusive-mode, and would take input *away* from the
   app under test).
@@ -364,6 +454,12 @@ discovered from `/v1/models`, or pinned with `--title-model`). The bearer is
 same config section. Note that a host firewall which allowlists the recgo
 binaries by path also permits this egress — narrow such a rule if you want
 remote transcription blocked.
+
+Servers cap the audio one request may carry (speaches refuses anything over
+1800 s), so a recording longer than 20 minutes is uploaded as several pieces.
+Each cut lands on the quietest half second near an even division of the
+recording, and the pieces' word and segment times are shifted back onto the
+session clock before VAD correction runs over the whole file.
 
 ## Tests
 

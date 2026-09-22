@@ -8,8 +8,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/eordano/recgo/internal/proc"
 )
 
 type Frame struct {
@@ -83,7 +84,7 @@ func StartPump(sess *Session, stream Stream, o PumpOptions) (*Pump, error) {
 	}
 
 	p.cmd = exec.Command(o.GstLaunch, strings.Fields(pipeline)...)
-	p.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	proc.Detach(p.cmd)
 	p.cmd.Stderr = &p.stderr
 	p.cmd.ExtraFiles = []*os.File{fd}
 
@@ -188,13 +189,13 @@ func (p *Pump) Stop() error {
 	p.mu.Unlock()
 
 	if p.cmd != nil && p.cmd.Process != nil {
-		p.cmd.Process.Signal(syscall.SIGINT)
+		proc.Interrupt(p.cmd.Process)
 		exited := make(chan struct{})
 		go func() { p.cmd.Wait(); close(exited) }()
 		select {
 		case <-exited:
 		case <-time.After(5 * time.Second):
-			syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+			proc.KillGroup(p.cmd.Process)
 			<-exited
 		}
 	}

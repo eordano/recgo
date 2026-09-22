@@ -97,11 +97,15 @@ type Recorder struct {
 	targetID  string
 	targetURL string
 
-	mu      sync.Mutex
-	visible bool
-	ring    []frame
-	wsURLs  map[string]string
-	stopped bool
+	mu        sync.Mutex
+	visible   bool
+	lastURL   string
+	lastTitle string
+	lastNav   *Event
+	navPrevT  string
+	ring      []frame
+	wsURLs    map[string]string
+	stopped   bool
 
 	frameSubs map[int]chan struct{}
 	nextSub   int
@@ -121,6 +125,7 @@ func NewSessionRecorder(cdp *CDP, s *Recording, targetID, targetURL string) *Rec
 		outDir:    s.OutDir,
 		targetID:  targetID,
 		targetURL: targetURL,
+		lastURL:   targetURL,
 		wsURLs:    map[string]string{},
 		frameSubs: map[int]chan struct{}{},
 	}
@@ -177,7 +182,9 @@ func (r *Recorder) Start() (offsetMs, errorMs float64, err error) {
 		return 0, 0, err
 	}
 
-	start := r.push(Event{T: 0, Kind: "record-start"})
+	url, title := r.pageLocation()
+	r.seedLocation(url, title)
+	start := r.push(Event{T: 0, Kind: "record-start", URL: url, Title: title})
 	if r.session.ClaimInitialShot() {
 		if data, err := r.captureFullShot(); err == nil {
 			if os.WriteFile(filepath.Join(r.outDir, InitialShot), data, sessionFileMode) == nil {
@@ -210,6 +217,7 @@ func (r *Recorder) registerHandlers() {
 		}
 		var msg struct {
 			Kind        string   `json:"kind"`
+			Top         bool     `json:"top"`
 			TimeOrigin  float64  `json:"timeOrigin"`
 			PageTime    float64  `json:"pageTime"`
 			URL         string   `json:"url"`
@@ -227,6 +235,11 @@ func (r *Recorder) registerHandlers() {
 		if !ok {
 			return
 		}
+		// inject.js runs in every frame; only the top document says where
+		// the user is. A click inside an iframe is still a click.
+		if msg.Top {
+			r.observeLocation(t, msg.URL, msg.Title)
+		}
 		switch msg.Kind {
 		case "click":
 			el := msg.Interactive
@@ -234,10 +247,10 @@ func (r *Recorder) registerHandlers() {
 				el = msg.Target
 			}
 			r.onClick(t, msg.URL, msg.Title, msg.X, msg.Y, el)
-		case "navigation":
-			r.push(Event{T: t, Kind: "navigation", URL: msg.URL})
 		case "visibility":
-			r.onVisibility(msg.Visible, msg.URL, msg.Title)
+			if msg.Top {
+				r.onVisibility(msg.Visible, msg.URL, msg.Title)
+			}
 		}
 	})
 

@@ -39,7 +39,7 @@ func GenerateTitle(o TitleOptions, tr *Transcript, events []Event) TitleResult {
 		return fallback("")
 	}
 	if tr == nil || !tr.OK || len(tr.Segments) == 0 {
-		return fallback("no narration to summarise; used the click-derived name")
+		return fallback("no narration to summarise; used the page-derived name")
 	}
 
 	body := sessionDigest(tr, events)
@@ -48,7 +48,7 @@ func GenerateTitle(o TitleOptions, tr *Transcript, events []Event) TitleResult {
 		eps = DefaultTitleEndpoints
 	}
 	if len(eps) == 0 {
-		return fallback("no title endpoint configured; used the click-derived name")
+		return fallback("no title endpoint configured; used the page-derived name")
 	}
 	timeout := o.Timeout
 	if timeout <= 0 {

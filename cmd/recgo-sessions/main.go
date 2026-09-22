@@ -26,7 +26,11 @@ type event struct {
 	X         *int     `json:"x,omitempty"`
 	Y         *int     `json:"y,omitempty"`
 	Img       string   `json:"img,omitempty"`
+	Count     int      `json:"count,omitempty"`
+	Through   string   `json:"through,omitempty"`
+	Note      string   `json:"note,omitempty"`
 	NoRepaint bool     `json:"norepaint,omitempty"`
+	Approves  bool     `json:"approves,omitempty"`
 	Fx        *float64 `json:"fx,omitempty"`
 	Fy        *float64 `json:"fy,omitempty"`
 	Start     bool     `json:"start,omitempty"`
@@ -47,9 +51,13 @@ type session struct {
 }
 
 var (
-	clickRE     = regexp.MustCompile(`^(\d\d\.\d\d\.\d\d)  Click: (.*?) → (\d{4}\.png)( — screen did not repaint)?\s*$`)
+	// After the image: an optional note (`— right-click`, `— outside ~ —
+	// Konsole`), the collapsed-run suffix, then the repaint suffix. The note
+	// group is lazily optional so the repaint suffix is never read as a
+	// note, and the note stops before a repaint suffix that follows it.
+	clickRE     = regexp.MustCompile(`^(\d\d\.\d\d\.\d\d)  Click: (.*?) → (\d{4}\.png)(?: — (.*?))??(?: \(×(\d+), through (\d{4}\.png)\))?( — screen did not repaint)?\s*$`)
 	shotRE      = regexp.MustCompile(`^(\d\d\.\d\d\.\d\d)  (Mark|Focus|Window): (.*?)(?: → (\d{4}\.png))?\s*$`)
-	narrBoldRE  = regexp.MustCompile(`^(\d\d\.\d\d\.\d\d)  \*\*user narration\*\*: (.*)$`)
+	narrBoldRE  = regexp.MustCompile(`^(\d\d\.\d\d\.\d\d)  \*\*user (narration|approves)\*\*: (.*)$`)
 	narrPlainRE = regexp.MustCompile(`^(\d\d\.\d\d\.\d\d): (.*)$`)
 	otherRE     = regexp.MustCompile(`^(\d\d\.\d\d\.\d\d)  ([A-Za-z._]+): (.*)$`)
 	coordRE     = regexp.MustCompile(`(?s)^(\d+),(\d+)(?: on (.*))?$`)
@@ -189,7 +197,8 @@ func parseSession(dir string) (*session, error) {
 			continue
 		}
 		if m := clickRE.FindStringSubmatch(line); m != nil {
-			ev := &event{Kind: "click", T: toSeconds(m[1]), Img: m[3], NoRepaint: m[4] != ""}
+			ev := &event{Kind: "click", T: toSeconds(m[1]), Img: m[3], Note: m[4], Through: m[6], NoRepaint: m[7] != ""}
+			ev.Count, _ = strconv.Atoi(m[5])
 			if c := coordRE.FindStringSubmatch(m[2]); c != nil {
 				x, _ := strconv.Atoi(c[1])
 				y, _ := strconv.Atoi(c[2])
@@ -211,7 +220,8 @@ func parseSession(dir string) (*session, error) {
 			continue
 		}
 		if m := narrBoldRE.FindStringSubmatch(line); m != nil {
-			events = append(events, &event{Kind: "narration", T: toSeconds(m[1]), Text: strings.TrimSpace(m[2])})
+			events = append(events, &event{Kind: "narration", T: toSeconds(m[1]),
+				Text: strings.TrimSpace(m[3]), Approves: m[2] == "approves"})
 			continue
 		}
 		if m := narrPlainRE.FindStringSubmatch(line); m != nil {
