@@ -79,7 +79,7 @@ func TestRealtimeEndToEnd(t *testing.T) {
 
 func TestRealtimeURL(t *testing.T) {
 	for in, want := range map[string]string{
-		"https://llm.decent.dev/v1":               "wss://llm.decent.dev/v1/realtime?intent=transcription",
+		"https://llm.example.org/v1":              "wss://llm.example.org/v1/realtime?intent=transcription",
 		"http://127.0.0.1:8000/v1/":               "ws://127.0.0.1:8000/v1/realtime?intent=transcription",
 		"wss://x/v1/realtime?intent=conversation": "wss://x/v1/realtime?intent=conversation",
 	} {

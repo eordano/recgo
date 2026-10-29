@@ -60,6 +60,18 @@ func NewPicker(port int) *Model {
 	return &Model{Mode: ModePick, port: port, started: time.Now()}
 }
 
+// Pick runs the picker over the browser's tabs; nil when it was cancelled.
+func Pick(port int) (*tab.TabInfo, error) {
+	m := NewPicker(port)
+	if _, err := tea.NewProgram(m).Run(); err != nil {
+		return nil, err
+	}
+	if m.Cancelled {
+		return nil, nil
+	}
+	return m.Chosen, nil
+}
+
 func NewFollow(port int, f *tab.Follower, rec *tab.Recording) *Model {
 	return &Model{Mode: ModeFollow, port: port, follower: f, rec: rec, started: time.Now()}
 }

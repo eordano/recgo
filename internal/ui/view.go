@@ -358,13 +358,6 @@ func padBar(left, right string, width int) string {
 	return "  " + left + strings.Repeat(" ", gap) + right
 }
 
-func padTo(n int) string {
-	if n < 1 {
-		return " "
-	}
-	return strings.Repeat(" ", n)
-}
-
 func wrapLines(text string, width int) []string {
 	text = strings.TrimSpace(text)
 	if text == "" {

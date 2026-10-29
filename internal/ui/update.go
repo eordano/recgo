@@ -114,7 +114,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recording = true
 		m.startTime = msg.startTime
 		m.recorder = msg.recorder
-		m.virtualSink = msg.virtualSink
 		m.err = nil
 		m.stats = audio.RecordingStats{}
 		m.micLevel = 0
@@ -309,14 +308,23 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(cmds...)
 		}
-		if audio.IsOwnSink(msg.newSink) {
-			return m, tea.Batch(cmds...)
+		cmds = append(cmds, settleDefaultSink(sinkSettleDelay))
+		return m, tea.Batch(cmds...)
+
+	case sinkSettledMsg:
+		if msg.err != nil {
+			logging.Log("re-reading the default sink failed: %v", msg.err)
+			return m, nil
 		}
-		if sinkChurnActive(time.Now(), m.suppressSinkUntil) {
-			logging.Log("ignoring default-sink change %q during self-induced restart window", msg.newSink)
-			return m, tea.Batch(cmds...)
+		if msg.sink == "" {
+			return m, nil
 		}
-		monName := msg.newSink + ".monitor"
+		now := time.Now()
+		if sinkChurnActive(now, m.suppressSinkUntil) {
+			logging.Log("default sink %q settled during self-induced restart window; re-checking when it closes", msg.sink)
+			return m, settleDefaultSink(m.suppressSinkUntil.Sub(now))
+		}
+		monName := msg.sink + ".monitor"
 		newIdx := -1
 		for i, d := range m.monitors {
 			if d.Name == monName {
@@ -325,19 +333,19 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if newIdx < 0 {
-			cmds = append(cmds, m.loadDevices)
-			return m, tea.Batch(cmds...)
+			return m, m.loadDevices
 		}
 		if newIdx == m.selectedMon {
-			return m, tea.Batch(cmds...)
+			return m, nil
 		}
+		logging.Log("default sink settled on %s; following its monitor", msg.sink)
 		m.selectedMon = newIdx
 		if m.recording {
 			m = m.armSinkChurn()
 			m = m.pauseTranscribeForRestart()
-			cmds = append(cmds, m.restartRecording)
+			return m, m.restartRecording
 		}
-		return m, tea.Batch(cmds...)
+		return m, nil
 	}
 
 	return m, nil
@@ -554,11 +562,6 @@ func (m Model) handleQuit() (tea.Model, tea.Cmd) {
 		m.recorder.Stop()
 	}
 
-	if m.virtualSink != nil {
-		logging.Log("Cleaning up virtual sink")
-		m.virtualSink.Cleanup()
-	}
-
 	if m.savedOutput != "" {
 		logging.Log("restoring output device to %q", m.savedOutput)
 		if err := audio.SetDefaultOutput(m.savedOutput); err != nil {
@@ -761,9 +764,6 @@ func (m Model) restartRecording() tea.Msg {
 	if m.recorder != nil {
 		m.recorder.Stop()
 	}
-	if m.virtualSink != nil {
-		m.virtualSink.Cleanup()
-	}
 	return m.startRecording()
 }
 
@@ -793,30 +793,12 @@ func (m Model) pauseTranscribeForRestart() Model {
 
 func (m Model) startRecording() tea.Msg {
 	var micDevice, monDevice string
-	var virtualSink *audio.VirtualSink
-	var monitorSource string
 
 	if m.selectedMic < len(m.mics) {
 		micDevice = m.mics[m.selectedMic].Name
 	}
 	if m.selectedMon < len(m.monitors) {
 		monDevice = m.monitors[m.selectedMon].Name
-		monitorSource = monDevice
-
-		if audio.NeedsVirtualSink(monDevice) {
-			logging.Log("Bluetooth monitor detected under PipeWire, setting up virtual sink")
-			realSink := audio.GetSinkNameFromMonitor(monDevice)
-			var recordSource string
-			var err error
-			virtualSink, recordSource, err = audio.NewVirtualSink(realSink)
-			if err != nil {
-				logging.Log("failed to create virtual sink: %v", err)
-				return recordingStartedMsg{err: err}
-			}
-			logging.Log("Virtual sink created, recording from %s instead of %s", recordSource, monDevice)
-			monDevice = recordSource
-			monitorSource = recordSource
-		}
 	}
 
 	now := time.Now()
@@ -830,17 +812,13 @@ func (m Model) startRecording() tea.Msg {
 	)
 
 	if err := recorder.Start(m.ctx); err != nil {
-		if virtualSink != nil {
-			virtualSink.Cleanup()
-		}
 		return recordingStartedMsg{err: err}
 	}
 
 	return recordingStartedMsg{
 		startTime:     now,
 		recorder:      recorder,
-		virtualSink:   virtualSink,
-		monitorSource: monitorSource,
+		monitorSource: monDevice,
 	}
 }
 

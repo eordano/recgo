@@ -53,7 +53,7 @@ func TestAttachNotesConnectAndDisconnect(t *testing.T) {
 	if got := notes.all(); got[0] != "AltTester app connected: __default__ (mock), server 2.3.0" {
 		t.Fatalf("connected note = %q", got[0])
 	}
-	app.ws.Close()
+	app.ws.CloseNow()
 	waitFor(t, "disconnected note", func() bool { return notes.has("AltTester app disconnected") })
 	if got := notes.all(); got[1] != "AltTester app disconnected: __default__ (mock)" {
 		t.Fatalf("disconnected note = %q", got[1])

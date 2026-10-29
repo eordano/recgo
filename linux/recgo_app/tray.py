@@ -1,9 +1,12 @@
+import html
 import os
+import subprocess
 
-from PySide6.QtCore import QObject, QTimer, Qt
+from PySide6.QtCore import SLOT, QObject, QTimer, Qt, Slot
+from PySide6.QtDBus import QDBusConnection, QDBusMessage
 from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence
 
-from recgo_app.widgets import open_path, reveal
+from recgo_app.widgets import copy_text, open_path, reveal
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QSystemTrayIcon, QVBoxLayout)
 
@@ -154,6 +157,27 @@ class Actions:
         return None
 
 
+NOTIFICATIONS = "org.freedesktop.Notifications"
+
+
+def notify_with_actions(title, body):
+    """The notification id, or None when no notification server answered.
+    busctl because the call's uint and a{sv} arguments do not survive PySide."""
+    try:
+        r = subprocess.run(["busctl", "--user", "--timeout=3", "call", NOTIFICATIONS,
+                            "/org/freedesktop/Notifications", NOTIFICATIONS, "Notify", "susssasa{sv}i",
+                            "Recgo", "0", "dev.eordano.recgo", title, html.escape(body, quote=False),
+                            "6", "default", "Open library", "reveal", "Show in folder", "copy", "Copy path",
+                            "1", "desktop-entry", "s", "dev.eordano.recgo", "10000"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    parts = r.stdout.split()
+    if r.returncode != 0 or len(parts) != 2 or parts[0] != "u":
+        return None
+    return int(parts[1])
+
+
 class TrayController(QObject):
     def __init__(self, windows, quit_cb, parent=None):
         super().__init__(parent)
@@ -165,6 +189,9 @@ class TrayController(QObject):
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self._activated)
         self.tray.messageClicked.connect(lambda: self.windows.show_library())
+        self._notified = {}
+        QDBusConnection.sessionBus().connect(NOTIFICATIONS, "/org/freedesktop/Notifications", NOTIFICATIONS,
+                                             "ActionInvoked", self, SLOT("_notification_action(QDBusMessage)"))
         self.menu.aboutToShow.connect(self._rebuild)
         rec = Recorder.shared()
         rec.phase_changed.connect(lambda _: self.refresh())
@@ -179,6 +206,34 @@ class TrayController(QObject):
         self._rebuild()
         self.refresh()
         self.tray.show()
+        self._tray_misses = 0
+        self._tray_timer = QTimer(self)
+        self._tray_timer.setInterval(10000)
+        self._tray_timer.timeout.connect(self._check_registered)
+        self._tray_timer.start()
+
+    def _check_registered(self):
+        watcher = "org.kde.StatusNotifierWatcher"
+        get = QDBusMessage.createMethodCall(watcher, "/StatusNotifierWatcher",
+                                            "org.freedesktop.DBus.Properties", "Get")
+        get.setArguments([watcher, "RegisteredStatusNotifierItems"])
+        QDBusConnection.sessionBus().callWithCallback(get, self, SLOT("_registered_items(QDBusMessage)"), 5000)
+
+    @Slot(QDBusMessage)
+    def _registered_items(self, reply):
+        bus = QDBusConnection.sessionBus()
+        for item in reply.arguments()[0].variant():
+            ask = QDBusMessage.createMethodCall("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                                "org.freedesktop.DBus", "GetConnectionUnixProcessID")
+            ask.setArguments([item.split("/", 1)[0]])
+            if bus.call(ask).arguments() == [os.getpid()]:
+                self._tray_misses = 0
+                return
+        self._tray_misses += 1
+        if self._tray_misses >= 2 and self.tray.isVisible():
+            self._tray_misses = 0
+            self.tray.hide()
+            self.tray.show()
 
     def refresh(self):
         rec = Recorder.shared()
@@ -265,13 +320,10 @@ class TrayController(QObject):
                           tip=rec.tab_url)
             elif rec.mode == RecordMode.window:
                 self._fact(rec.source or "picking the screen…")
-            if rec.mode == RecordMode.audio:
-                self._fact("Microphone: " + (rec.mic_source or AppSettings.shared().mic_label))
-                self._fact("System audio: %s (own track)" % (rec.monitor_source or "none"),
-                           tip="recgo records what you hear as a track of its own, next to the microphone")
-            else:
-                for fact in rec.facts:
-                    self._fact(fact)
+            for fact in rec.facts:
+                own_track = rec.mode == RecordMode.audio and fact.startswith("System audio: ")
+                self._fact(fact, tip="recgo records what you hear as a track of its own, next to the "
+                                     "microphone" if own_track else "")
             where = rec.where
             self._add("   " + rec.where_label,
                       (lambda: reveal(where) if rec.mode == RecordMode.audio else open_path(where)) if where else None,
@@ -359,8 +411,30 @@ class TrayController(QObject):
                       QSystemTrayIcon.ActivationReason.DoubleClick):
             self.windows.show_library()
 
-    def notify(self, title, body):
+    def notify(self, title, body, path=None):
+        """With a path, the notification carries Show in folder / Copy path
+        buttons; QSystemTrayIcon messages cannot, so those go over D-Bus."""
+        if path:
+            nid = notify_with_actions(title, body)
+            if nid is not None:
+                self._notified[nid] = path
+                while len(self._notified) > 20:
+                    del self._notified[next(iter(self._notified))]
+                return
         self.tray.showMessage(title, body, self._icons["idle"], 6000)
+
+    @Slot(QDBusMessage)
+    def _notification_action(self, msg):
+        args = msg.arguments()
+        path = self._notified.get(args[0]) if len(args) == 2 else None
+        if path is None:
+            return
+        if args[1] == "reveal":
+            reveal(path)
+        elif args[1] == "copy":
+            copy_text(path)
+        elif args[1] == "default":
+            self.windows.show_library()
 
     def hide(self):
         self.tray.hide()

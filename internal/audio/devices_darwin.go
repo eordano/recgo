@@ -26,6 +26,10 @@ func GetDefaultSource() (string, error) {
 	return "default", nil
 }
 
+func DefaultMic() (string, error) { return GetDefaultSource() }
+
+func preferLiveMic(devices []Device, def *Device) *Device { return def }
+
 func GetDefaultSink() (string, error) { return "", nil }
 
 func DefaultMonitor() (string, error) {
@@ -144,16 +148,6 @@ func ListAllDevices() (mics []Device, monitors []Device, err error) {
 		}
 	}
 	return mics, monitors, nil
-}
-
-type VirtualSink struct{}
-
-func (v *VirtualSink) Cleanup() {}
-
-func NeedsVirtualSink(monitorName string) bool { return false }
-
-func NewVirtualSink(realSinkName string) (*VirtualSink, string, error) {
-	return nil, "", fmt.Errorf("virtual sink not supported on darwin")
 }
 
 func CleanupOrphanedVirtualSinks() {}

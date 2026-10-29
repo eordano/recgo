@@ -42,7 +42,6 @@ type Mic struct {
 	opts    MicOptions
 	device  string
 	monitor string
-	vsink   *audio.VirtualSink
 	cmd     *exec.Cmd
 	rawPath string
 	wavPath string
@@ -68,6 +67,7 @@ type MicResult struct {
 }
 
 func StartMic(o MicOptions) (*Mic, error) {
+	audio.CleanupOrphanedVirtualSinks()
 	if o.FFmpegBin == "" {
 		o.FFmpegBin = "ffmpeg"
 	}
@@ -82,7 +82,7 @@ func StartMic(o MicOptions) (*Mic, error) {
 		} else if err := audio.CheckBackend(); err != nil {
 			return nil, err
 		}
-		d, err := audio.GetDefaultSource()
+		d, err := audio.DefaultMic()
 		if err != nil {
 			return nil, fmt.Errorf("could not resolve default capture source: %w", err)
 		}
@@ -100,14 +100,6 @@ func StartMic(o MicOptions) (*Mic, error) {
 		wavPath: filepath.Join(o.OutDir, "audio.wav"),
 		done:    make(chan struct{}),
 	}
-	if m.monitor != "" && audio.NeedsVirtualSink(m.monitor) {
-		vs, mon, err := audio.NewVirtualSink(audio.GetSinkNameFromMonitor(m.monitor))
-		if err != nil {
-			return nil, fmt.Errorf("system audio via %s: %w", m.monitor, err)
-		}
-		m.vsink, m.monitor = vs, mon
-	}
-
 	m.cmd = exec.Command(o.FFmpegBin, micFFmpegArgs(device, m.monitor)...)
 	proc.Detach(m.cmd)
 
@@ -120,7 +112,6 @@ func StartMic(o MicOptions) (*Mic, error) {
 		return nil, err
 	}
 	if err := m.cmd.Start(); err != nil {
-		m.vsink.Cleanup()
 		return nil, fmt.Errorf("start ffmpeg: %w", err)
 	}
 
@@ -171,7 +162,7 @@ func micFFmpegArgs(device, monitor string) []string {
 	if monitor != "" {
 		args = append(args, audio.FFmpegMonitorInputArgs(monitor)...)
 		args = append(args,
-			"-filter_complex", "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[a]",
+			"-filter_complex", "[1:a]"+audio.MonitorGapFill+"[sys];[0:a][sys]amix=inputs=2:duration=longest:normalize=0[a]",
 			"-map", "[a]")
 	}
 	return append(args,
@@ -179,6 +170,9 @@ func micFFmpegArgs(device, monitor string) []string {
 		"-ar", fmt.Sprint(micRate),
 		"-f", "s16le", "pipe:1")
 }
+
+// Device is the microphone actually recorded, after default resolution.
+func (m *Mic) Device() string { return m.device }
 
 // Monitor is the source system audio is mixed in from, empty when only the
 // microphone is captured.
@@ -236,7 +230,6 @@ func (m *Mic) Stop() MicResult {
 		<-m.done
 	}
 	m.cmd.Wait()
-	m.vsink.Cleanup()
 
 	m.mu.Lock()
 	n := m.bytes

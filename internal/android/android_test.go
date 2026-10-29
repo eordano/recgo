@@ -136,7 +136,7 @@ func TestRecordLifecycle(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
-	for _, serial := range []string{"emulator-5580", "56181FDCH0052N", "10.0.0.5:5555", "[::1]:5555"} {
+	for _, serial := range []string{"emulator-5580", "0A1B2C3D4E5F6G", "10.0.0.5:5555", "[::1]:5555"} {
 		if _, err := (Options{Serial: serial, Package: "com.example.app"}).validate(); err != nil {
 			t.Fatal(err)
 		}

@@ -123,10 +123,25 @@ func TestStartArgv(t *testing.T) {
 	}
 }
 
+// feedAgainst starts a feed session against handler and pushes one second of audio.
+func feedAgainst(t *testing.T, handler http.HandlerFunc) *Session {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	s := NewFeed(context.Background(), Config{Endpoint: srv.URL})
+	s.interval = 50 * time.Millisecond
+	if err := s.StartFeed(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Stop)
+	s.Feed(make([]byte, sampleRate*bytesPerSample))
+	return s
+}
+
 func TestFeedSessionTranscribesPushedPCM(t *testing.T) {
 	var mu sync.Mutex
 	var prompts []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := feedAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			t.Errorf("bad multipart: %v", err)
 		}
@@ -134,17 +149,7 @@ func TestFeedSessionTranscribesPushedPCM(t *testing.T) {
 		prompts = append(prompts, r.FormValue("prompt"))
 		mu.Unlock()
 		w.Write([]byte(`{"text":"hello there"}`))
-	}))
-	defer srv.Close()
-
-	s := NewFeed(context.Background(), Config{Endpoint: srv.URL})
-	s.interval = 50 * time.Millisecond
-	if err := s.StartFeed(); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop()
-
-	s.Feed(make([]byte, sampleRate*bytesPerSample))
+	})
 
 	deadline := time.After(3 * time.Second)
 	for {
@@ -258,20 +263,10 @@ func TestStopDuringEmitDoesNotPanic(t *testing.T) {
 
 func TestFirstPassFailureReachesUpdates(t *testing.T) {
 	fails := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := feedAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		fails++
 		http.Error(w, "boom", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	s := NewFeed(context.Background(), Config{Endpoint: srv.URL})
-	s.interval = 50 * time.Millisecond
-	if err := s.StartFeed(); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop()
-
-	s.Feed(make([]byte, sampleRate*bytesPerSample))
+	})
 
 	deadline := time.After(3 * time.Second)
 	for {
@@ -308,24 +303,14 @@ func TestNoBackendConfiguredIsAnError(t *testing.T) {
 func TestFeedSessionThreadsLockedTextAsPrompt(t *testing.T) {
 	var mu sync.Mutex
 	var prompts []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := feedAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		r.ParseMultipartForm(32 << 20)
 		mu.Lock()
 		n := len(prompts)
 		prompts = append(prompts, r.FormValue("prompt"))
 		mu.Unlock()
 		fmt.Fprintf(w, `{"text":"pass %d"}`, n)
-	}))
-	defer srv.Close()
-
-	s := NewFeed(context.Background(), Config{Endpoint: srv.URL})
-	s.interval = 50 * time.Millisecond
-	if err := s.StartFeed(); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop()
-
-	s.Feed(make([]byte, sampleRate*bytesPerSample))
+	})
 	deadline := time.After(3 * time.Second)
 	for {
 		var st State
@@ -358,7 +343,7 @@ func TestFeedSessionThreadsLockedTextAsPrompt(t *testing.T) {
 func TestPromptRejectingEndpointDegradesToPromptless(t *testing.T) {
 	var mu sync.Mutex
 	var prompts []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := feedAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		r.ParseMultipartForm(32 << 20)
 		mu.Lock()
 		n := len(prompts)
@@ -370,17 +355,7 @@ func TestPromptRejectingEndpointDegradesToPromptless(t *testing.T) {
 			return
 		}
 		fmt.Fprintf(w, `{"text":"pass %d"}`, n)
-	}))
-	defer srv.Close()
-
-	s := NewFeed(context.Background(), Config{Endpoint: srv.URL})
-	s.interval = 50 * time.Millisecond
-	if err := s.StartFeed(); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop()
-
-	s.Feed(make([]byte, sampleRate*bytesPerSample))
+	})
 	deadline := time.After(3 * time.Second)
 	for {
 		var st State

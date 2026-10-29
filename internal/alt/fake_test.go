@@ -1,6 +1,7 @@
 package alt
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -9,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 // fakeApp is a spec-shaped mock app: it dials /altws/app and answers
@@ -61,20 +62,21 @@ func dialApp(t *testing.T, s *Server, name string, probe bool) *fakeApp {
 	t.Helper()
 	q := url.Values{"appName": {name}, "platform": {"mock"}, "platformVersion": {"0"},
 		"deviceInstanceId": {"mock"}, "appId": {"mock"}}
-	ws, _, err := websocket.DefaultDialer.Dial("ws://"+s.Addr()+"/altws/app?"+q.Encode(), nil)
+	ws, _, err := websocket.Dial(context.Background(), "ws://"+s.Addr()+"/altws/app?"+q.Encode(), nil)
 	if err != nil {
 		t.Fatalf("app dial: %v", err)
 	}
+	ws.SetReadLimit(-1)
 	f := &fakeApp{t: t, ws: ws, probe: probe, done: make(chan struct{})}
 	go f.loop()
-	t.Cleanup(func() { ws.Close() })
+	t.Cleanup(func() { ws.CloseNow() })
 	return f
 }
 
 func (f *fakeApp) loop() {
 	defer close(f.done)
 	for {
-		_, data, err := f.ws.ReadMessage()
+		_, data, err := f.ws.Read(context.Background())
 		if err != nil {
 			return
 		}
@@ -95,7 +97,7 @@ func (f *fakeApp) loop() {
 			continue
 		}
 		for _, item := range f.answer(cmd) {
-			if err := f.ws.WriteMessage(websocket.TextMessage, []byte(fakeEnvelope(cmd, item))); err != nil {
+			if err := f.ws.Write(context.Background(), websocket.MessageText, []byte(fakeEnvelope(cmd, item))); err != nil {
 				return
 			}
 		}
@@ -103,7 +105,7 @@ func (f *fakeApp) loop() {
 }
 
 func (f *fakeApp) close() {
-	f.ws.Close()
+	f.ws.CloseNow()
 	<-f.done
 }
 
@@ -257,17 +259,19 @@ type extDriverConn struct {
 func dialDriver(t *testing.T, s *Server, appName string) *extDriverConn {
 	t.Helper()
 	q := url.Values{"appName": {appName}, "driverType": {"go-test"}}
-	ws, _, err := websocket.DefaultDialer.Dial("ws://"+s.Addr()+"/altws?"+q.Encode(), nil)
+	ws, _, err := websocket.Dial(context.Background(), "ws://"+s.Addr()+"/altws?"+q.Encode(), nil)
 	if err != nil {
 		t.Fatalf("driver dial: %v", err)
 	}
-	t.Cleanup(func() { ws.Close() })
+	ws.SetReadLimit(-1)
+	t.Cleanup(func() { ws.CloseNow() })
 	return &extDriverConn{t: t, ws: ws}
 }
 
 func (d *extDriverConn) read() (map[string]any, error) {
-	d.ws.SetReadDeadline(time.Now().Add(3 * time.Second))
-	_, data, err := d.ws.ReadMessage()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, data, err := d.ws.Read(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +293,7 @@ func (d *extDriverConn) mustRead() map[string]any {
 
 func (d *extDriverConn) send(m map[string]any) {
 	d.t.Helper()
-	if err := d.ws.WriteMessage(websocket.TextMessage, []byte(js(m))); err != nil {
+	if err := d.ws.Write(context.Background(), websocket.MessageText, []byte(js(m))); err != nil {
 		d.t.Fatalf("driver send: %v", err)
 	}
 }

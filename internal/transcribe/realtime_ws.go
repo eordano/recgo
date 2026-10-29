@@ -13,7 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 
 	"github.com/eordano/recgo/internal/logging"
 )
@@ -126,15 +127,17 @@ func (s *Session) realtimeOnce() error {
 	if s.cfg.APIKey != "" {
 		hdr.Set("Authorization", "Bearer "+s.cfg.APIKey)
 	}
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
-	conn, resp, err := dialer.DialContext(s.ctx, target, hdr)
+	dctx, dcancel := context.WithTimeout(s.ctx, 10*time.Second)
+	conn, resp, err := websocket.Dial(dctx, target, &websocket.DialOptions{HTTPHeader: hdr})
+	dcancel()
 	if err != nil {
 		if resp != nil {
 			return fmt.Errorf("dial %s: %v (http %d)", target, err, resp.StatusCode)
 		}
 		return fmt.Errorf("dial %s: %w", target, err)
 	}
-	defer conn.Close()
+	defer conn.CloseNow()
+	conn.SetReadLimit(-1)
 
 	setup := map[string]any{
 		"type": "session.update",
@@ -151,7 +154,7 @@ func (s *Session) realtimeOnce() error {
 			"output_audio_format": "pcm16",
 		},
 	}
-	if err := conn.WriteJSON(setup); err != nil {
+	if err := wsjson.Write(s.ctx, conn, setup); err != nil {
 		return fmt.Errorf("session.update: %w", err)
 	}
 	logging.Log("transcribe: realtime connected to %s", target)
@@ -179,8 +182,9 @@ func (s *Session) realtimeOnce() error {
 			return err
 		default:
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(realtimeMaxRetry * 6))
-		_, data, err := conn.ReadMessage()
+		rctx, rcancel := context.WithTimeout(ctx, realtimeMaxRetry*6)
+		_, data, err := conn.Read(rctx)
+		rcancel()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -291,8 +295,10 @@ func (s *Session) realtimeSend(ctx context.Context, conn *websocket.Conn, base i
 			"type":  "input_audio_buffer.append",
 			"audio": base64.StdEncoding.EncodeToString(out),
 		}
-		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		if err := conn.WriteJSON(msg); err != nil {
+		wctx, wcancel := context.WithTimeout(ctx, 10*time.Second)
+		err := wsjson.Write(wctx, conn, msg)
+		wcancel()
+		if err != nil {
 			return fmt.Errorf("append: %w", err)
 		}
 	}

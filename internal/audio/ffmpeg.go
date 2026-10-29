@@ -40,6 +40,11 @@ type Recorder struct {
 	started      bool
 }
 
+// MonitorGapFill pads a monitor capture with silence where its timestamps
+// jump: a relinked PipeWire stream pauses, the pulse demuxer stamps the wall
+// clock, and amix counts samples, so without it later audio lands early.
+const MonitorGapFill = "aresample=async=1"
+
 var progressRegex = regexp.MustCompile(`size=\s*(\d+)\s*([KMGTkmgt]i?[Bb])?\s+time=(\d+:\d+:\d+\.\d+)\s+bitrate=\s*([\d.]+)kbits/s\s+speed=\s*([\d.]+)x`)
 
 func NewRecorder(outputPath, micDevice, monitorDevice, codec, bitrate string) *Recorder {
@@ -65,11 +70,14 @@ func (r *Recorder) buildArgs() []string {
 	if hasMic {
 		args = append(args, ffmpegInputArgs(r.micDevice)...)
 	}
-	if hasMic && hasMonitor {
+	switch {
+	case hasMic && hasMonitor:
 		args = append(args,
-			"-filter_complex", "[0:a:0][1:a:0] amix=inputs=2:duration=longest:normalize=0 [a]",
-			"-map", "[a]", "-map", "0:a", "-map", "1:a",
+			"-filter_complex", "[0:a:0]"+MonitorGapFill+",asplit=2[sys][sysmix];[sysmix][1:a:0]amix=inputs=2:duration=longest:normalize=0[a]",
+			"-map", "[a]", "-map", "[sys]", "-map", "1:a",
 		)
+	case hasMonitor:
+		args = append(args, "-af", MonitorGapFill)
 	}
 
 	return append(args, "-c:v", "copy", "-c:a", r.audioCodec, "-ac", "2", "-ar", "48000", "-b:a", r.bitrate, "-y", r.outputPath)

@@ -358,12 +358,11 @@ func (o *bridgeObj) Screens(raw string) *dbus.Error {
 }
 
 type kwinBridge struct {
-	conn         *dbus.Conn
-	name         string
-	obj          *bridgeObj
-	scripts      sync.Mutex
-	cursorMu     sync.Mutex
-	cursorScript string
+	conn     *dbus.Conn
+	name     string
+	obj      *bridgeObj
+	scripts  sync.Mutex
+	cursorMu sync.Mutex
 }
 
 var (

@@ -49,6 +49,7 @@ type RemoteTranscriptionConfig struct {
 
 type RecordingConfig struct {
 	OutputDir   string `toml:"output_dir"`
+	SessionsDir string `toml:"sessions_dir"`
 	Format      string `toml:"format"`
 	AudioCodec  string `toml:"audio_codec"`
 	Bitrate     string `toml:"bitrate"`

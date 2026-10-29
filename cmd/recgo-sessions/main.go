@@ -65,7 +65,7 @@ var (
 )
 
 func main() {
-	dir := flag.String("dir", "", "sessions root (default: [recording] output_dir in config.toml, else ~/walk-and-talk; ~/Documents/walk-and-talk on macOS)")
+	dir := flag.String("dir", "", "sessions root (default: [recording] sessions_dir in config.toml, else ~/walk-and-talk; ~/Documents/walk-and-talk on macOS)")
 	out := flag.String("out", "", "output file (default <dir>/index.html)")
 	flag.Parse()
 

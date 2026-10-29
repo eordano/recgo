@@ -152,6 +152,29 @@ def test_audio_lines_from_recgo_drive_the_live_state(monkeypatch):
     assert rec.marks == 0
 
 
+def test_device_facts_name_what_the_recorder_opened(monkeypatch):
+    s = _Settings()
+    rec = _recorder(monkeypatch, s)
+    monkeypatch.setattr(rec, "_spawn", lambda mode: None)
+    redraws = []
+    rec.live_changed.connect(lambda: redraws.append(1))
+    rec.start(RecordMode.audio, meeting=True)
+    rec.phase = Phase.recording
+    rec._ingest("mic: alsa_input.pci-0000_00_1f.3.analog-stereo")
+    rec._ingest("monitor: none")
+    assert rec.facts == ["Microphone: alsa_input.pci-0000_00_1f.3.analog-stereo", "System audio: off"]
+    rec._ingest("monitor: bluez_output.AA_BB.1.monitor")
+    assert rec.facts[1] == "System audio: bluez_output.AA_BB.1.monitor (own track)"
+    assert len(redraws) == 3
+    s.systemAudio = True
+    rec.phase = Phase.idle
+    rec.start(RecordMode.tab)
+    rec.phase = Phase.recording
+    rec._ingest("audio: microphone alsa_input.usb")
+    rec._ingest("audio: system audio mixed in from alsa_output.usb.monitor")
+    assert rec.facts[:2] == ["Microphone: alsa_input.usb", "System audio: alsa_output.usb.monitor"]
+
+
 def test_finished_path_names_a_folder_or_the_recording_file():
     assert finished_path(["stopping...", "wrote /x/2026-09-14-desktop/SESSION.md"]) == "/x/2026-09-14-desktop"
     assert finished_path(["wrote /x/2026.09.14-10.00-standup.mkv", "Uploading /x/... -> https://r/api/upload ...",
@@ -265,3 +288,12 @@ def test_meet_acceptance_records_the_call_as_recgo_meet(monkeypatch):
     rec.phase = Phase.idle
     rec.start(RecordMode.audio)
     assert rec.name == "audio"
+
+def test_upload_summary_says_where_and_how_much():
+    from recgo_app.recorder import upload_summary
+    http = ('https://recordings.example.org/api/upload '
+            '({"saved": "2026.09/2026.09.24-16.54-meet.mkv", "bytes": 534297})')
+    assert upload_summary(http) == "uploaded to recordings.example.org (534 KB)"
+    assert upload_summary("user@nas:/srv/walk-and-talk/a.mkv") == "uploaded to nas"
+    assert upload_summary("https://x.example/up (not json)") == "uploaded to x.example"
+    assert upload_summary("https://x.example/up ({\"bytes\": 12})") == "uploaded to x.example (12 bytes)"

@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import re
@@ -9,7 +10,7 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signa
 
 from recgo_app.cdp import CDP
 from recgo_app.model import EventKind, SessionDoc, SessionEvent, clock_seconds, parse_session_doc
-from recgo_app.settings import AppSettings, RecordMode, extra_path_dirs
+from recgo_app.settings import AppSettings, RecordMode, extra_path_dirs, host_of
 
 TRANSCRIPT_RE = re.compile(r"^(\d\d:\d\d:\d\d)  (narration|system): (.*)$")
 
@@ -42,6 +43,22 @@ def finished_path(lines):
 def uploaded_to(lines):
     up = next((l for l in reversed(lines) if l.startswith("Uploaded to ")), None)
     return up[len("Uploaded to "):].strip() if up else ""
+
+
+def upload_summary(uploaded):
+    """`recgo` reports an HTTP upload as `<endpoint> (<server's JSON reply>)`
+    and an rsync push as `host:/path/file`; a person needs where and how much."""
+    dest, _, reply = uploaded.partition(" (")
+    where = host_of(dest) if "://" in dest else dest.split(":", 1)[0].rsplit("@", 1)[-1]
+    try:
+        size = float(json.loads(reply.removesuffix(")"))["bytes"])
+    except (ValueError, KeyError, TypeError):
+        return "uploaded to " + where
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if size < 1000 or unit == "GB":
+            break
+        size /= 1000
+    return "uploaded to %s (%s)" % (where, "%d %s" % (size, unit) if unit == "bytes" else "%.3g %s" % (size, unit))
 
 
 def mint_room():
@@ -144,6 +161,7 @@ class Recorder(QObject):
 
     # What this session captures and where its bytes go, fixed at start:
     # a setting changed mid-session describes the next one, not this one.
+    # Only the device lines move, once the recorder names what it opened.
     def _freeze_facts(self, mode):
         s = AppSettings.shared()
         facts = []
@@ -164,6 +182,14 @@ class Recorder(QObject):
             facts.append("Screenshots on " + " and ".join(shots) if shots else "No click or focus screenshots")
         self.facts = facts
         self.data_lines = s.data_lines()
+
+    def _set_fact(self, prefix, fact):
+        for i, f in enumerate(self.facts):
+            if f.startswith(prefix):
+                if f != fact:
+                    self.facts[i] = fact
+                    self.live_changed.emit()
+                return
 
     def start(self, mode, target=None, meeting=False, name=""):
         if self.phase != Phase.idle:
@@ -384,9 +410,13 @@ class Recorder(QObject):
             self.tab_title = line[len("attached to: "):].strip()
         elif line.startswith("capturing "):
             self.source = line[len("capturing "):].strip()
+        elif line.startswith("audio: microphone "):
+            self.mic_source = line[len("audio: microphone "):].strip()
+            self._set_fact("Microphone: ", "Microphone: " + self.mic_source)
         elif line.startswith("audio: system audio mixed in from "):
             self.system_audio_source = line[len("audio: system audio mixed in from "):].strip()
             self.system_audio = True
+            self._set_fact("System audio: ", "System audio: " + self.system_audio_source)
         elif line in ("system audio: on", "system audio: off"):
             self.system_audio = line.endswith(" on")
         elif line.startswith("system audio: "):
@@ -404,9 +434,12 @@ class Recorder(QObject):
             self.recording_path = line[len("recording -> "):].strip()
         elif line.startswith("mic: "):
             self.mic_source = line[len("mic: "):].strip()
+            self._set_fact("Microphone: ", "Microphone: " + self.mic_source)
         elif line.startswith("monitor: "):
             src = line[len("monitor: "):].strip()
             self.monitor_source = "" if src == "none" else src
+            self._set_fact("System audio: ", "System audio: %s (own track)" % src if self.monitor_source
+                           else "System audio: off")
         elif line.startswith("error: "):
             self.last_error = line[len("error: "):].strip()
         else:

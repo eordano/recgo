@@ -74,7 +74,7 @@ def configured_out_root():
     try:
         import tomllib
         with open(path, "rb") as f:
-            value = tomllib.load(f).get("recording", {}).get("output_dir", "")
+            value = tomllib.load(f).get("recording", {}).get("sessions_dir", "")
     except (OSError, ValueError):
         return ""
     return os.path.expanduser(value) if value else ""

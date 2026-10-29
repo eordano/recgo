@@ -8,8 +8,8 @@ from PySide6.QtWidgets import QComboBox, QFileDialog, QLineEdit, QScrollArea, QS
 
 from recgo_app import hotkeys
 from recgo_app.hotkeys import Hotkeys
-from recgo_app.settings import (RECORDER_CONF, SHORTCUT_KEYS, AppSettings, RecordMode, recorder_config,
-                                whisper_models)
+from recgo_app.settings import (RECORDER_CONF, SHORTCUT_KEYS, AppSettings, RecordMode, audio_output_dir,
+                                recorder_config, whisper_models)
 from recgo_app.theme import Theme, css, white
 from recgo_app.widgets import (Button, HoverRow, Segment, ShortcutCapture, Toggle, hbox, highlight, label,
                                mono_field, open_path, set_color, vbox, vline)
@@ -340,16 +340,20 @@ class SettingsWindow(QWidget):
         mics = [(n, d) for n, d in sources if not n.endswith(".monitor")]
         monitors = [("", "Monitor of the default output")] + [(n, d) for n, d in sources if n.endswith(".monitor")]
         self.row(lay, "Microphone device", "The default follows what PipeWire/PulseAudio marks as the default "
-                 "source; the list comes from pactl.", self.selector("micDevice", mics, width=320))
+                 "source, except for the Bluetooth headset case below; the list comes from pactl.",
+                 self.selector("micDevice", mics, width=320))
         self.toggle_row(lay, "Include system audio", "Mixed into the narration track at unity gain. Can be muted while "
                         "recording from the tray menu, the HUD or recgo-app --system-audio; each toggle adds a "
                         "Note line to the session.", "systemAudio")
         self.row(lay, "System audio source", "A sink's .monitor source. The default follows the default output "
                  "at the moment recording starts.", self.selector("monitorDevice", monitors, width=320),
                  last=True)
-        self.banner(lay, "Bluetooth outputs go through a temporary sink",
-                    "On PipeWire a Bluetooth monitor yields nothing, so the recorder loads a null sink, makes it "
-                    "the default output for the session, loops it back to the headset, and removes it at stop.",
+        self.banner(lay, "When the default is a Bluetooth headset's microphone",
+                    "Opening it switches the headset to call mode, which drops what you hear to mono call audio "
+                    "and briefly cuts playback. So while the headset plays in high quality, the recorder takes "
+                    "the one other microphone an app already has open, normally your call's. With no other "
+                    "microphone open, or several, it records the headset microphone; choosing the headset "
+                    "microphone above always records it.",
                     Theme.amber)
 
     def transcription(self, lay):
@@ -507,7 +511,7 @@ class SettingsWindow(QWidget):
         choose = self.button("Choose…", self._choose_root)
         choose.setEnabled(not self.s.managed("outRoot"))
         if self.s.managed("outRoot"):
-            choose.setToolTip("Set by the NixOS config (desktop.recgo.outputDir); the CLIs read the same folder")
+            choose.setToolTip("Set by the NixOS config (desktop.recgo.sessionsDir); the CLIs read the same folder")
         self.folder_row = self.row(lay, "Session folder", self.s.out_root, choose, mono=True)
         from recgo_app.library import LibraryStore
         store = LibraryStore.shared()
@@ -515,6 +519,9 @@ class SettingsWindow(QWidget):
             store.reload()
         self.row(lay, "Storage used", "%d sessions in %s" % (len(store.sessions), os.path.basename(self.s.out_root)),
                  self.button("Open folder", lambda: open_path(self.s.out_root)))
+        recordings = audio_output_dir()
+        self.row(lay, "Recordings folder", recordings,
+                 self.button("Open folder", lambda: open_path(recordings)), mono=True)
         self.row(lay, "HTML index", "recgo-sessions writes a self-contained index.html viewer into the session "
                  "folder, for reading the library without this app.",
                  self.button("Regenerate", self._regenerate), last=True)

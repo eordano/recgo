@@ -5,13 +5,12 @@ from PySide6.QtCore import QObject, QRectF, QRunnable, QSize, Qt, QThreadPool, Q
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QImageReader, QPainter, QPen, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (QApplication, QFileDialog, QGraphicsDropShadowEffect, QLabel, QLineEdit, QMenu,
-                               QScrollArea, QSizePolicy, QStackedWidget, QWidget)
+                               QScrollArea, QSizePolicy, QWidget)
 
 from recgo_app.model import EventKind, clock_string, scan_library, waveform_bins
 from recgo_app.settings import AppSettings
 from recgo_app.theme import Theme, css, white
-from recgo_app.widgets import (Button, ElidedLabel, HoverRow, Segment, hbox, highlight, hline, label, mono_field,
-                               open_path, reveal, rich_label, set_color, vbox, vline)
+from recgo_app.widgets import (Button, ElidedLabel, HoverRow, Segment, hbox, highlight, hline, label, open_path, reveal, rich_label, set_color, vbox, vline)
 
 
 _hay = {}

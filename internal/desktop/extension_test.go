@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"errors"
+	"github.com/eordano/recgo/internal/sessioncli"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestExtensionStartFailureAbortsTheRun(t *testing.T) {
 		Start: func(note func(string)) error { return errors.New("listen tcp 127.0.0.1:13000: address already in use") },
 		Stop:  func() { stopped = true },
 	})
-	err := run(opts{out: t.TempDir(), sttBackend: "none"})
+	err := run(opts{Options: sessioncli.Options{Out: t.TempDir(), STTBackend: "none"}})
 	if err == nil || !strings.Contains(err.Error(), "address already in use") {
 		t.Fatalf("run = %v, want the Start error", err)
 	}

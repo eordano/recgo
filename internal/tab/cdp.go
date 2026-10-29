@@ -1,6 +1,7 @@
 package tab
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,14 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
-const (
-	cdpReadBuffer  = 256 << 10
-	cdpWriteBuffer = 32 << 10
-	cdpCallTimeout = 30 * time.Second
-)
+const cdpCallTimeout = 30 * time.Second
 
 type Target struct {
 	ID                   string `json:"id"`
@@ -51,8 +49,6 @@ type EventHandler func(params json.RawMessage)
 
 type CDP struct {
 	conn *websocket.Conn
-
-	writeMu sync.Mutex
 
 	mu       sync.Mutex
 	nextID   int
@@ -131,20 +127,16 @@ func AttachTarget(port int, id string) (*CDP, *Target, error) {
 }
 
 func Dial(wsURL string) (*CDP, error) {
-	dialer := &websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-		ReadBufferSize:   cdpReadBuffer,
-		WriteBufferSize:  cdpWriteBuffer,
-	}
-
-	conn, res, err := dialer.Dial(wsURL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	conn, res, err := websocket.Dial(ctx, wsURL, nil)
+	cancel()
 	if err != nil {
 		if res != nil {
 			return nil, fmt.Errorf("dial %s: %w (http %d)", wsURL, err, res.StatusCode)
 		}
 		return nil, fmt.Errorf("dial %s: %w", wsURL, err)
 	}
-	conn.SetReadLimit(0)
+	conn.SetReadLimit(-1)
 
 	c := &CDP{
 		conn:     conn,
@@ -158,7 +150,7 @@ func Dial(wsURL string) (*CDP, error) {
 
 func (c *CDP) readLoop() {
 	for {
-		_, data, err := c.conn.ReadMessage()
+		_, data, err := c.conn.Read(context.Background())
 		if err != nil {
 			c.failAll(err)
 			return
@@ -214,9 +206,7 @@ func (c *CDP) failAll(err error) {
 }
 
 func (c *CDP) writeJSON(v any) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return c.conn.WriteJSON(v)
+	return wsjson.Write(context.Background(), c.conn, v)
 }
 
 func (c *CDP) Send(method string, params any, result any) error {
@@ -300,11 +290,12 @@ func (c *CDP) Close() error {
 		return nil
 	}
 
-	c.writeMu.Lock()
-	c.conn.WriteControl(websocket.CloseMessage,
-		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
-		time.Now().Add(time.Second))
-	c.writeMu.Unlock()
-
-	return c.conn.Close()
+	done := make(chan error, 1)
+	go func() { done <- c.conn.Close(websocket.StatusNormalClosure, "") }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(time.Second):
+		return c.conn.CloseNow()
+	}
 }

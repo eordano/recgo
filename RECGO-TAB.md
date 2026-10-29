@@ -8,7 +8,7 @@ LLM can act on.
 recgo-tab --launch http://localhost:5173 --duration 30s
 ```
 
-Output lands in `~/walk-and-talk/YYYY-MM-DD-HH-MM-<slug>/` (`[recording] output_dir` in `~/.config/recgo/config.toml` overrides; macOS keeps `~/Documents/walk-and-talk`):
+Output lands in `~/walk-and-talk/YYYY-MM-DD-HH-MM-<slug>/` (`[recording] sessions_dir` in `~/.config/recgo/config.toml` overrides; macOS keeps `~/Documents/walk-and-talk`):
 
 ```
 SESSION.md     the deliverable, and the only document — one line per thing that happened
@@ -208,9 +208,22 @@ BlackHole on macOS), or `default` for the default output's monitor. ffmpeg
 opens it as a second input and `amix`es both at unity gain into the same
 16kHz mono `audio.wav`, so the clock and the calibration tone are unchanged --
 the tone is in fact heard more reliably, since the monitor carries it even on
-headphones. Bluetooth outputs on PipeWire yield nothing from their monitor;
-those go through a temporary null sink that becomes the default output for
-the session and is removed at stop, the recipe the `recgo` TUI already uses.
+headphones, Bluetooth ones included: the monitor is captured directly and the
+default output is never touched. A monitor that pauses (a Bluetooth sink
+rebuilt by a profile switch or a dropped transport) is padded with silence at
+its wall-clock gap (`aresample=async=1`), so the mix stays aligned with the
+microphone.
+
+Without `--mic` the microphone is the system default source, with one
+exception: when that default is a Bluetooth headset's microphone
+(WirePlumber's autoswitch source) and the headset is playing in high quality
+(A2DP), opening it would switch the headset to call mode (HSP/HFP), dropping
+what you hear to mono call audio and briefly cutting playback. Then, if
+exactly one other microphone is already held open by an app (normally your
+call's; level meters do not count), that one is recorded instead; with none
+or several, the headset's microphone is recorded after all. A named `--mic`
+always wins. This is the same rule as the `recgo` TUI, and stderr names the
+microphone opened (`audio: microphone <name>`).
 
 While recording, `sysaudio off` / `sysaudio on` on stdin mute and unmute the
 monitor capture stream in place (`pactl set-source-output-mute` on the stream
@@ -269,8 +282,8 @@ One deliberate divergence: recgo encodes to a file, recgo-tab takes raw s16le on
 anchors the transcript to the session clock — a file gives no such signal. It is
 also the only part of the audio path not inherited from recgo.
 
-Not yet adopted: the silence watchdog and the Bluetooth null-sink path. Both
-matter for long sessions — see "Known gaps".
+Not yet adopted: the silence watchdog, which matters for long sessions — see
+"Known gaps".
 
 ## The three findings worth knowing
 
@@ -477,17 +490,18 @@ scripted session through real Chromium, and asserts against the packed folder.
 `ffmpeg -f lavfi anullsrc`, and establish ground truth with
 `ffmpeg -af silencedetect`.
 
-The websocket transport is `github.com/gorilla/websocket` — the only dependency
-recgo-tab adds. It is worth it: CDP screencast frames routinely exceed 64KiB and
+The websocket transport is `github.com/coder/websocket` (the fleet's one WebSocket
+package, see `docs/dependencies.org`) — the only dependency recgo-tab adds. It is worth it: CDP screencast frames routinely exceed 64KiB and
 Chrome fragments messages across continuation frames, so the codec has to get
 extended lengths, masking and interleaved control frames right on every single
 message. `cdp_test.go` tests the client against a real websocket server rather
 than a codec fake, covering out-of-order reply correlation under concurrency,
 900KB messages in both directions, dropped connections, and use after close.
 
-Note gorilla permits one concurrent reader and one concurrent writer; `CDP`
-serialises writes behind a mutex because `SendAsync` (screencastFrameAck) fires
-from the read loop while callers may be sending commands.
+coder/websocket allows one reader and any number of concurrent writers, so `CDP`
+needs no write lock of its own even though `SendAsync` (screencastFrameAck) fires
+from the read loop while callers may be sending commands. Its default 32 KiB read
+limit is lifted (`SetReadLimit(-1)`) for screencast frames.
 
 ## recgo-browser — the default, following you across tabs
 
@@ -699,8 +713,6 @@ trusting the exit code.
 - **No watchdog yet.** recgo restarts a flatlined capture and concatenates
   segments; that would break a single audio anchor, so adopting it needs a
   per-segment anchor and a restart event on the timeline.
-- **No system-audio capture yet**, which is what would make the calibration tone
-  reliable regardless of headphones.
 - **No video** — frames only.
 - **Audio capture is recgo's, but the PCM pipe is not.** Device handling and
   the ffmpeg invocation are inherited from recgo; reading raw samples off

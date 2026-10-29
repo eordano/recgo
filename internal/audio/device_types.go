@@ -1,7 +1,5 @@
 package audio
 
-import "strings"
-
 type DeviceType int
 
 const (
@@ -32,16 +30,14 @@ type Device struct {
 	State       string     `json:"state"`
 }
 
-const sinkNamePrefix = "recgo_record_sink"
-
 func FindDefaultMic(devices []Device) *Device {
 	for i, d := range devices {
 		if d.IsDefault && d.Type == DeviceTypeMic {
-			return &devices[i]
+			return preferLiveMic(devices, &devices[i])
 		}
 	}
 	if len(devices) > 0 {
-		return &devices[0]
+		return preferLiveMic(devices, &devices[0])
 	}
 	return nil
 }
@@ -64,12 +60,4 @@ func FindDefaultMonitor(devices []Device) *Device {
 		return &devices[0]
 	}
 	return nil
-}
-
-func IsOwnSink(name string) bool {
-	return strings.HasPrefix(strings.TrimSuffix(name, ".monitor"), sinkNamePrefix)
-}
-
-func GetSinkNameFromMonitor(monitorName string) string {
-	return strings.TrimSuffix(monitorName, ".monitor")
 }

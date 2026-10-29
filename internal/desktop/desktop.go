@@ -8,17 +8,16 @@ import (
 	"image/png"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/eordano/recgo/internal/config"
 	"github.com/eordano/recgo/internal/screencast"
+	"github.com/eordano/recgo/internal/sessioncli"
 	"github.com/eordano/recgo/internal/tab"
 	"github.com/eordano/recgo/internal/transcribe"
 	"github.com/eordano/recgo/internal/upload"
@@ -65,75 +64,29 @@ func applyResolved(e *tab.Event, el *tab.Element, note string) {
 // Main is the whole CLI: recgo-desktop records every screen, recgo-window
 // one screen (or window) chosen when it starts; everything else is shared.
 func Main(tool string) {
-	window := tool == "recgo-window"
-	out := flag.String("out", "", "output root (default: [recording] output_dir in config.toml, else ~/walk-and-talk; ~/Documents/walk-and-talk on macOS)")
-	var screen *string
-	var listScreens *bool
-	if window {
-		screen = flag.String("screen", "",
+	o := opts{tool: tool, window: tool == "recgo-window"}
+	var listScreens bool
+	if o.window {
+		flag.StringVar(&o.screen, "screen", "",
 			"which screen to record: its number in -list-screens, or 'main'; with no value "+
 				"recgo-window asks on the terminal (macOS), or in the desktop's own screen/window "+
 				"picker (Linux, where this flag is ignored and the picker also offers single windows)")
-		listScreens = flag.Bool("list-screens", false, "print the attached screens, one per line, and exit")
+		flag.BoolVar(&listScreens, "list-screens", false, "print the attached screens, one per line, and exit")
 	}
-	duration := flag.Duration("duration", 0, "stop automatically after this long; otherwise Ctrl-C")
-	noAudio := flag.Bool("no-audio", false, "skip microphone capture")
-	noVideo := flag.Bool("no-video", false,
+	flag.BoolVar(&o.noVideo, "no-video", false,
 		"skip screen capture entirely — record mic narration only (what the Mac app's Audio mode runs)")
-	micDevice := flag.String("mic", "", "capture device (default: system default source)")
-	requireSystemAudio := flag.Bool("require-system-audio", false, "fail instead of falling back to microphone-only if system audio is unavailable")
-	systemAudio := flag.String("system-audio", "",
-		"mix what you hear into the narration track: a monitor source (<sink>.monitor, or a "+
-			"loopback device on macOS), or 'default' for the default output; 'sysaudio off' / "+
-			"'sysaudio on' on stdin mutes and unmutes it while recording")
-	ffmpegBin := flag.String("ffmpeg", "ffmpeg", "ffmpeg binary")
-	gstLaunch := flag.String("gst-launch", "gst-launch-1.0", "GStreamer binary (Linux frame capture)")
-	sttBackend := flag.String("stt-backend", "auto",
-		"auto (local if a whisper model is found, else remote) | local (whisper.cpp, nothing leaves this machine) | remote (uploads audio) | realtime (uploads audio; streams narration over the endpoint's /v1/realtime websocket as you speak, final transcript via the batch endpoint) | none")
-	whisperBin := flag.String("whisper-bin", "whisper-cli", "whisper.cpp CLI")
-	whisperModel := flag.String("whisper-model", "", "ggml model (default: discovered, see below)")
-	whisperVAD := flag.String("whisper-vad-model", "", "silero VAD model (default: discovered)")
-	sttURL := flag.String("stt-url", "", "remote only: override the OpenAI-compatible endpoint list")
-	sttModel := flag.String("stt-model", "", "remote only: override the per-endpoint model")
-	sttKey := flag.String("stt-api-key", "", "remote only: bearer token (falls back to $OPENAI_API_KEY / $LLM_API_KEY)")
-	sttLanguage := flag.String("stt-language", "", "force a language instead of autodetecting")
-	noVAD := flag.Bool("no-vad-correct", false, "remote only: skip the local silencedetect pass (NOT ADVISED)")
-	keepRaw := flag.Bool("keep-raw", false, "keep audio.pcm alongside audio.wav")
-	tokenPath := flag.String("restore-token", "", "file holding the portal restore token (default under $XDG_STATE_HOME)")
-	jsonOut := flag.Bool("json", false, "also write session.json (full machine-readable timeline)")
-	clickShots := flag.Bool("click-shots", true,
+	flag.BoolVar(&o.requireSystemAudio, "require-system-audio", false, "fail instead of falling back to microphone-only if system audio is unavailable")
+	flag.StringVar(&o.gstLaunch, "gst-launch", "gst-launch-1.0", "GStreamer binary (Linux frame capture)")
+	flag.StringVar(&o.tokenPath, "restore-token", "", "file holding the portal restore token (default under $XDG_STATE_HOME)")
+	flag.BoolVar(&o.clickShots, "click-shots", true,
 		"screenshot every mouse click, like recgo-tab does in the browser; on macOS this "+
 			"needs the Accessibility (or Input Monitoring) grant, on Linux (KDE Plasma) read "+
 			"access to /dev/input -- the input group (--click-shots=false to disable)")
-	focusShots := flag.Bool("focus-shots", true,
+	flag.BoolVar(&o.focusShots, "focus-shots", true,
 		"screenshot when another window, app or browser tab comes to the front, and when "+
 			"a new window or dialog appears; rides the Screen Recording grant the recorder "+
 			"already holds on macOS, a KWin script on Linux (--focus-shots=false to disable)")
-	live := flag.Bool("live", true,
-		"build the session document as it is recorded: print each line as it happens and keep "+
-			"SESSION.live.md current in the session folder; narration is transcribed while you "+
-			"speak (locally with --stt-backend local); with --stt-backend remote this also "+
-			"STREAMS NARRATION AUDIO to the STT endpoint while recording (--live=false to disable)")
-	titleBackend := flag.String("title-backend", "",
-		"name the session with an LLM: remote (UPLOADS THE TRANSCRIPT) | none (default: follow --stt-backend)")
-	titleURL := flag.String("title-url", "", "override the OpenAI-compatible endpoint list used for the title")
-	titleModel := flag.String("title-model", "", "override the chat model (default: whatever the endpoint serves)")
-	portal := flag.String("portal", "",
-		"portal server URL (wss://host or https://host): dial out and serve read-only file "+
-			"tools over the output root while recording, so an agent in that portal room can "+
-			"follow the live session. EXPOSES THE OUTPUT ROOT (all sessions, read-only) to "+
-			"everyone in the room for as long as the recording runs; requires --portal-room")
-	portalRoom := flag.String("portal-room", "",
-		"portal room to join; the room name is the only credential, so pick an unguessable one")
-	syncTarget := flag.String("sync-target", "",
-		"rsync destination (host:/path) for the finished session; defaults to the [upload] "+
-			"target in the config file, and is empty unless an operator set one. PUSHES THE "+
-			"WHOLE SESSION (transcript, events, screenshots) to that host as soon as the "+
-			"recording is written, instead of waiting for whatever periodic sync the machine "+
-			"runs; --no-sync keeps it local")
-	syncKey := flag.String("sync-key", "", "ssh identity for --sync-target")
-	noSync := flag.Bool("no-sync", false,
-		"keep the finished session on this machine even when a sync target is configured")
+	o.Register(sessioncli.LiveHelp)
 
 	flag.Usage = func() {
 		switch tool {
@@ -147,7 +100,7 @@ func Main(tool string) {
 		}
 		fmt.Fprintf(os.Stderr, "Usage: %s [flags]\n\n", tool)
 		flag.PrintDefaults()
-		if window {
+		if o.window {
 			fmt.Fprintf(os.Stderr, "\nOnly the screen (or window) picked at start is captured: frames and every\n"+
 				"screenshot show that one source. The pick is asked for on every start and\n"+
 				"never remembered. recgo-desktop records every screen instead.\n")
@@ -158,46 +111,15 @@ func Main(tool string) {
 			"nothing else leaves it either; without one, --stt-backend auto (the default)\n"+
 			"UPLOADS THE AUDIO to the configured remote endpoint. Pass --stt-backend local\n"+
 			"or none to guarantee nothing is uploaded.\n")
-		fmt.Fprintf(os.Stderr, "\nLocal models are discovered from, in order:\n")
-		for _, d := range tab.ModelSearchPaths() {
-			fmt.Fprintf(os.Stderr, "  %s\n", d)
-		}
-		fmt.Fprintf(os.Stderr, "\nRemote endpoints come from --stt-url / --title-url, else from\n"+
-			"[transcription.remote] in %s.\n", config.ConfigPath())
+		sessioncli.UsageTail()
 	}
 	flag.Parse()
 
-	if listScreens != nil && *listScreens {
+	if listScreens {
 		printScreens(os.Stdout, screencast.DisplayList())
 		return
 	}
-
-	o := opts{
-		tool: tool, window: window,
-		out: *out, duration: *duration, noAudio: *noAudio, noVideo: *noVideo, micDevice: *micDevice,
-		systemAudio: *systemAudio, requireSystemAudio: *requireSystemAudio,
-		ffmpegBin: *ffmpegBin, gstLaunch: *gstLaunch, sttBackend: *sttBackend,
-		whisperBin: *whisperBin, whisperModel: *whisperModel, whisperVAD: *whisperVAD,
-		sttURL: *sttURL, sttModel: *sttModel, sttKey: *sttKey, sttLanguage: *sttLanguage,
-		noVAD: *noVAD, keepRaw: *keepRaw, tokenPath: *tokenPath, json: *jsonOut,
-		clickShots: *clickShots, focusShots: *focusShots, live: *live,
-		titleBackend: *titleBackend, titleURL: *titleURL, titleModel: *titleModel,
-		portal: *portal, portalRoom: *portalRoom,
-		syncTarget: *syncTarget, syncKey: *syncKey, noSync: *noSync,
-	}
-	if screen != nil {
-		o.screen = *screen
-	}
-
-	if cfg, err := config.Load(); err == nil {
-		o.cfgURL = cfg.Transcription.Remote.Endpoint
-		o.cfgModel = cfg.Transcription.Remote.Model
-		o.cfgKey = cfg.Transcription.Remote.APIKey
-		if o.syncTarget == "" && cfg.Upload.Enabled {
-			o.syncTarget = cfg.Upload.Target
-			o.syncKey = cfg.Upload.SSHKey
-		}
-	}
+	o.Load()
 
 	if err := run(o); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", tool, err)
@@ -206,49 +128,35 @@ func Main(tool string) {
 }
 
 type opts struct {
-	tool, screen                         string
-	window                               bool
-	out, micDevice, ffmpegBin, gstLaunch string
-	systemAudio                          string
-	requireSystemAudio                   bool
-	sttBackend, whisperBin               string
-	liveRealtime                         bool
-	whisperModel, whisperVAD, tokenPath  string
-	sttURL, sttModel, sttKey             string
-	sttLanguage                          string
-	titleBackend, titleURL, titleModel   string
-	cfgURL, cfgModel, cfgKey             string
-	portal, portalRoom                   string
-	syncTarget, syncKey                  string
-	noAudio, noVideo, noVAD, json, live  bool
-	keepRaw, clickShots, noSync          bool
-	focusShots                           bool
-	duration                             time.Duration
+	sessioncli.Options
+	tool, screen, gstLaunch, tokenPath string
+	window, noVideo, requireSystemAudio bool
+	clickShots, focusShots              bool
 }
 
 func (o opts) liveFeed() *transcribe.Session {
-	if !o.live || o.noAudio {
+	if !o.Live || o.NoAudio {
 		return nil
 	}
-	switch o.sttBackend {
+	switch o.STTBackend {
 	case "remote":
-		eps := o.sttEndpoints()
+		eps := o.Endpoints()
 		if len(eps) == 0 {
 			fmt.Fprintln(os.Stderr, "live: narration disabled -- no remote STT endpoint configured "+
 				"(set --stt-url, or [transcription.remote] endpoint in the recgo config)")
 			return nil
 		}
-		key := tab.APIKey(o.sttKey, o.cfgKey)
+		key := tab.APIKey(o.STTKey, o.CfgKey)
 		fmt.Fprintf(os.Stderr, "live: streaming narration to %s as it is spoken -- the final "+
 			"transcript is still redone from the full recording (--live=false to disable)\n", eps[0].URL)
-		if o.liveRealtime {
+		if o.LiveRealtime {
 			fmt.Fprintf(os.Stderr, "live: streaming narration to %s over its realtime websocket as it is spoken "+
 				"-- the final transcript is still redone from the full recording (--live=false to disable)\n", eps[0].URL)
-			return tab.RealtimeLiveFeed(context.Background(), eps[0], key, o.sttModel)
+			return tab.RealtimeLiveFeed(context.Background(), eps[0], key, o.STTModel)
 		}
-		return tab.RemoteLiveFeed(context.Background(), eps[0], key, o.sttModel)
+		return tab.RemoteLiveFeed(context.Background(), eps[0], key, o.STTModel)
 	case "local":
-		feed, reason := tab.LocalLiveFeed(context.Background(), o.whisperBin, o.whisperModel, o.whisperVAD)
+		feed, reason := tab.LocalLiveFeed(context.Background(), o.WhisperBin, o.WhisperModel, o.WhisperVAD)
 		if feed == nil {
 			fmt.Fprintf(os.Stderr, "live: narration disabled -- %s\n", reason)
 			return nil
@@ -258,10 +166,6 @@ func (o opts) liveFeed() *transcribe.Session {
 		return feed
 	}
 	return nil
-}
-
-func (o opts) sttEndpoints() []tab.Endpoint {
-	return tab.Endpoints(o.sttURL, o.sttModel, o.cfgURL, o.cfgModel)
 }
 
 func tokenFile(override string) string {
@@ -289,54 +193,25 @@ func systemInfo() *tab.SystemInfo {
 }
 
 func run(o opts) error {
-	if o.requireSystemAudio && (o.noAudio || o.systemAudio == "") {
+	if o.requireSystemAudio && (o.NoAudio || o.SystemAudio == "") {
 		return fmt.Errorf("system audio required: provide -system-audio and enable audio capture")
 	}
 	if o.noVideo {
-		if o.noAudio {
+		if o.NoAudio {
 			return fmt.Errorf("--no-video with --no-audio leaves nothing to record")
 		}
 		o.clickShots, o.focusShots = false, false
 	}
-	if o.sttBackend == "realtime" {
-		o.liveRealtime = true
-		o.sttBackend = "remote"
-	}
-	if o.sttBackend == "auto" {
-		if m, _ := tab.DiscoverWhisperModel(); m != "" || o.whisperModel != "" {
-			o.sttBackend = "local"
-		} else {
-			o.sttBackend = "remote"
-			if eps := o.sttEndpoints(); len(eps) > 0 {
-				fmt.Fprintf(os.Stderr, "stt: no local whisper model found — audio will be uploaded to %s\n"+
-					"     (pass --stt-backend local or none to keep everything on this machine)\n",
-					eps[0].URL)
-			}
-		}
-	}
-
-	started := time.Now()
-	root := o.out
-	if root == "" {
-		root = tab.DefaultOutRoot()
-	}
-	stamp := started.Format("2006-01-02-15-04")
-	provisional := filepath.Join(root, fmt.Sprintf("%s-recording-%d", stamp, os.Getpid()))
-	if err := os.MkdirAll(provisional, 0o700); err != nil {
+	o.ResolveBackend()
+	started, root, stamp, provisional, err := o.Provision()
+	if err != nil {
 		return err
 	}
-
-	if o.portal != "" {
-		if o.portalRoom == "" {
-			return fmt.Errorf("--portal requires --portal-room (the room name is the credential)")
-		}
-		bridge, err := tab.StartPortalBridge(o.portal, o.portalRoom, root,
-			func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) })
-		if err != nil {
-			return err
-		}
-		defer bridge.Close()
+	stopPortal, err := o.StartPortal(root)
+	if err != nil {
+		return err
 	}
+	defer stopPortal()
 
 	clock := tab.NewClock()
 	rec := tab.NewRecording(clock, provisional)
@@ -357,7 +232,6 @@ func run(o opts) error {
 	}
 
 	var desk *screencast.Desktop
-	var err error
 	backend := "audio-only"
 	if !o.noVideo && o.window {
 		var chosen *screencast.DisplayInfo
@@ -413,27 +287,20 @@ func run(o opts) error {
 	}
 
 	var mic *tab.Mic
-	if !o.noAudio {
-		monitor, err := tab.ResolveMonitor(o.systemAudio)
+	if !o.NoAudio {
+		monitor, err := tab.ResolveMonitor(o.SystemAudio)
 		if err != nil && o.requireSystemAudio {
 			return fmt.Errorf("system audio required: %w", err)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "system audio: %v -- recording the microphone alone\n", err)
 		}
-		mic, err = tab.StartMic(tab.MicOptions{
-			Clock: clock, OutDir: provisional, Device: o.micDevice, Monitor: monitor,
-			FFmpegBin: o.ffmpegBin, Tap: tapFn,
-		})
-		if err != nil {
+		if mic, err = o.StartMic(clock, provisional, monitor, tapFn); err != nil {
 			if o.noVideo || o.requireSystemAudio {
 				return fmt.Errorf("audio: %w (nothing else to record)", err)
 			}
 			fmt.Fprintf(os.Stderr, "audio: %v\n", err)
-			mic = nil
 			feed = nil
-		} else if mic.Monitor() != "" {
-			fmt.Fprintf(os.Stderr, "audio: system audio mixed in from %s\n", mic.Monitor())
 		}
 	}
 
@@ -530,14 +397,14 @@ func run(o opts) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "recording via %s — type m<enter> to mark a moment\n", backend)
-	if o.duration > 0 {
-		fmt.Fprintf(os.Stderr, "stopping after %s\n", o.duration)
+	if o.Duration > 0 {
+		fmt.Fprintf(os.Stderr, "stopping after %s\n", o.Duration)
 	} else {
 		fmt.Fprintln(os.Stderr, "press Ctrl-C to stop")
 	}
 
 	var lv *tab.LiveView
-	if o.live {
+	if o.Live {
 		header := fmt.Sprintf("# Session (recording — replaced by SESSION.md at stop)\n\n"+
 			"Start: %s\nCapture: %s\n\n", started.Format("2006-01-02 15:04:05"), backend)
 		lv = tab.StartLiveView(rec, os.Stderr, header)
@@ -580,7 +447,7 @@ func run(o opts) error {
 	}
 	go tab.ReadCommands(os.Stdin, mic, mark, note)
 
-	waitForStop(o.duration)
+	sessioncli.WaitForStop(o.Duration)
 	fmt.Fprintln(os.Stderr, "stopping...")
 	if stopClicks != nil {
 		stopClicks()
@@ -610,27 +477,8 @@ func run(o opts) error {
 
 	durationMs := clock.Now()
 	rec.Push(tab.Event{T: durationMs, Kind: "record-stop"})
-	wavPath, audioNote := "", ""
-	if mic != nil {
-		res := mic.Stop()
-		audioNote = res.Note
-		if res.Err != nil {
-			fmt.Fprintf(os.Stderr, "audio: %v\n", res.Err)
-		} else {
-			wavPath = res.WavPath
-			if !o.keepRaw {
-				os.Remove(res.RawPath)
-			}
-		}
-	}
-
-	if wavPath != "" && o.sttBackend != "none" {
-		fmt.Fprintln(os.Stderr, "transcribing audio...")
-	}
-	transcript := transcribeWav(o, clock, wavPath)
-	if transcript != nil && !transcript.OK {
-		fmt.Fprintf(os.Stderr, "transcription: %s\n", transcript.Reason)
-	}
+	wavPath, audioNote := o.StopMic(mic)
+	transcript := o.Transcribe(clock, wavPath, nil)
 
 	events := rec.Snapshot()
 	tool, base := o.tool, "desktop"
@@ -646,13 +494,7 @@ func run(o opts) error {
 	}
 	title := ""
 	titleNote := ""
-	if o.titleBackend == "remote" || (o.titleBackend == "" && o.sttBackend == "remote") {
-		fmt.Fprintln(os.Stderr, "naming the session...")
-	}
-	named := titleFor(o, transcript, events)
-	if named.Note != "" {
-		fmt.Fprintf(os.Stderr, "title: %s\n", named.Note)
-	}
+	named := o.Title(transcript, events)
 	if named.Title != "" {
 		title, titleNote, slug = named.Title, named.Note, named.Slug
 	}
@@ -666,9 +508,9 @@ func run(o opts) error {
 		Slug: slug, Title: title, StartedISO: started.UTC().Format(time.RFC3339),
 		StartedWall: started.Format("2006-01-02 15:04:05"),
 		DurationMs:  durationMs, Cwd: cwd, TargetURL: backend, FrameStream: frameStream,
-		Tool: tool, AudioNote: audioNote, TitleNote: titleNote, SystemAudio: systemAudioOf(mic),
+		Tool: tool, AudioNote: audioNote, TitleNote: titleNote, SystemAudio: sessioncli.SystemAudio(mic),
 		System: systemInfo(),
-	}, tab.PackOptions{JSON: o.json})
+	}, tab.PackOptions{JSON: o.JSON})
 	if err != nil {
 		return err
 	}
@@ -698,13 +540,13 @@ func captureLabel(backend, source string) string {
 // now. A failure is reported and swallowed -- the recording is already safely
 // on disk, and the periodic sync is still a backstop.
 func syncSession(o opts, dir string) {
-	if o.noSync || o.syncTarget == "" {
+	if o.NoSync || o.SyncTarget == "" {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "  syncing -> %s ...\n", o.syncTarget)
+	fmt.Fprintf(os.Stderr, "  syncing -> %s ...\n", o.SyncTarget)
 	dest, err := upload.SyncDir(config.UploadConfig{
-		Target: o.syncTarget,
-		SSHKey: o.syncKey,
+		Target: o.SyncTarget,
+		SSHKey: o.SyncKey,
 	}, dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  sync failed (kept locally): %v\n", err)
@@ -716,27 +558,6 @@ func syncSession(o opts, dir string) {
 			fmt.Fprintf(os.Stderr, "  shared -> %s\n", local)
 		}
 	}
-}
-
-func titleFor(o opts, transcript *tab.Transcript, events []tab.Event) tab.TitleResult {
-	backend := o.titleBackend
-	if backend == "" {
-		backend = o.sttBackend
-	}
-	if backend != "remote" {
-		return tab.GenerateTitle(tab.TitleOptions{}, transcript, events)
-	}
-
-	var eps []tab.Endpoint
-	if o.titleURL != "" {
-		eps = []tab.Endpoint{{URL: o.titleURL, Model: o.titleModel}}
-	} else if o.cfgURL != "" {
-		eps = []tab.Endpoint{{URL: o.cfgURL}}
-	}
-	key := tab.APIKey(o.sttKey, o.cfgKey)
-	return tab.GenerateTitle(tab.TitleOptions{
-		Enabled: true, Endpoints: eps, Model: o.titleModel, APIKey: key,
-	}, transcript, events)
 }
 
 func captureInitialShot(desk *screencast.Desktop, rec *tab.Recording, ev *tab.Event, dir string) {
@@ -807,55 +628,6 @@ func captureAround(desk *screencast.Desktop, rec *tab.Recording, ev *tab.Event,
 	}
 }
 
-func transcribeWav(o opts, clock *tab.Clock, wavPath string) *tab.Transcript {
-	switch o.sttBackend {
-	case "none":
-		return &tab.Transcript{Reason: "transcription disabled (--stt-backend none)"}
-	case "local", "remote":
-	default:
-		return &tab.Transcript{Reason: fmt.Sprintf(
-			"unknown --stt-backend %q (want auto, local, remote or none)", o.sttBackend)}
-	}
-	if wavPath == "" {
-		return &tab.Transcript{Reason: "no audio was captured"}
-	}
-
-	if o.sttBackend == "local" {
-		model, vad := tab.ResolveWhisperModel(o.whisperModel, o.whisperVAD)
-		t := tab.TranscribeLocal(clock, wavPath, o.whisperBin, model, vad, "")
-		if t.OK && vad == "" {
-			fmt.Fprintf(os.Stderr, "warning: %s\n", t.AccuracyNote)
-		}
-		return &t
-	}
-
-	eps := o.sttEndpoints()
-	if len(eps) == 0 {
-		return &tab.Transcript{Reason: "no remote STT endpoint configured — set --stt-url, or " +
-			"[transcription.remote] endpoint in " + config.ConfigPath()}
-	}
-	fmt.Fprintf(os.Stderr, "stt: --stt-backend remote — uploading %s to %s\n", wavPath, eps[0].URL)
-
-	key := tab.APIKey(o.sttKey, o.cfgKey)
-
-	t := tab.TranscribeFallback(clock, wavPath, tab.STTOptions{
-		Endpoints: eps, Model: o.sttModel, APIKey: key, Language: o.sttLanguage,
-	})
-	if !t.OK {
-		return &t
-	}
-	if len(t.Attempts) > 0 {
-		fmt.Fprintf(os.Stderr, "stt: fell back to %s after %d failure(s)\n", t.Endpoint, len(t.Attempts))
-	}
-	if !o.noVAD {
-		t = tab.VADCorrect(t, wavPath, o.ffmpegBin, clock)
-		if !t.VADCorrected {
-			fmt.Fprintf(os.Stderr, "warning: VAD correction skipped — %s\n", t.VADReason)
-		}
-	}
-	return &t
-}
-
 // printScreens lists the attached displays the way -screen numbers them:
 // "N<tab>WxH<tab>main" per line, so a GUI can build its own picker from it.
 func printScreens(w io.Writer, displays []screencast.DisplayInfo) {
@@ -920,24 +692,4 @@ func chooseScreen(spec string, displays []screencast.DisplayInfo, in io.Reader, 
 		return nil, fmt.Errorf("%q is not a screen number", line)
 	}
 	return pick(n)
-}
-
-func waitForStop(d time.Duration) {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	if d > 0 {
-		select {
-		case <-ctx.Done():
-		case <-time.After(d):
-		}
-		return
-	}
-	<-ctx.Done()
-}
-
-func systemAudioOf(mic *tab.Mic) string {
-	if mic == nil {
-		return ""
-	}
-	return mic.Monitor()
 }

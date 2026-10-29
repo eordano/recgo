@@ -31,7 +31,7 @@ func main() {
 	doUpload := flag.Bool("upload", false, "Upload the finished recording to the configured remote (overrides upload.enabled)")
 	noUpload := flag.Bool("no-upload", false, "Keep the finished recording on this machine even when upload.enabled is set")
 	headless := flag.Bool("headless", false, "No terminal UI: the same recording, with the state the TUI would draw printed on stderr one line per change (what the desktop app's Audio only runs); stop with SIGINT or q<enter>")
-	micFlag := flag.String("mic", "", "Record this source instead of the default microphone (a name from the m list)")
+	micFlag := flag.String("mic", "", "Record this source, a name from the m list, instead of the default (the system default source; a playing Bluetooth headset's mic yields to the one other mic an app has open)")
 	monFlag := flag.String("system-audio", "", "Record this monitor source instead of the default output's (a name from the s list)")
 	transcribeFlag := flag.Bool("transcribe", false, "Start with live transcription on, as if t were pressed (uploads audio to the configured endpoint)")
 

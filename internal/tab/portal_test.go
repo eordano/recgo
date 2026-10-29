@@ -1,6 +1,7 @@
 package tab
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -11,7 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 // fakePortal is the server side of the bridge lane: it upgrades whatever
@@ -25,15 +27,15 @@ type fakePortal struct {
 func newFakePortal(t *testing.T) *fakePortal {
 	t.Helper()
 	f := &fakePortal{conns: make(chan *websocket.Conn, 4)}
-	up := websocket.Upgrader{}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("intent") != "bridge" {
 			t.Errorf("dialed intent %q, want bridge", r.URL.Query().Get("intent"))
 		}
-		conn, err := up.Upgrade(w, r, nil)
+		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
+		conn.SetReadLimit(-1)
 		f.conns <- conn
 	}))
 	t.Cleanup(f.srv.Close)
@@ -53,9 +55,10 @@ func (f *fakePortal) accept(t *testing.T) *websocket.Conn {
 
 func recvJSON(t *testing.T, conn *websocket.Conn) map[string]any {
 	t.Helper()
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var msg map[string]any
-	if err := conn.ReadJSON(&msg); err != nil {
+	if err := wsjson.Read(ctx, conn, &msg); err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	return msg
@@ -63,7 +66,7 @@ func recvJSON(t *testing.T, conn *websocket.Conn) map[string]any {
 
 func callTool(t *testing.T, conn *websocket.Conn, id, name string, input map[string]any) map[string]any {
 	t.Helper()
-	if err := conn.WriteJSON(map[string]any{
+	if err := wsjson.Write(context.Background(), conn, map[string]any{
 		"t": "tool_call", "id": id, "name": name, "input": input,
 	}); err != nil {
 		t.Fatalf("write: %v", err)
@@ -121,7 +124,7 @@ func TestPortalBridgeHelloAndRoundTrips(t *testing.T) {
 	root := portalRoot(t)
 	startBridge(t, f.srv.URL, root)
 	conn := f.accept(t)
-	defer conn.Close()
+	defer conn.CloseNow()
 
 	hello := recvJSON(t, conn)
 	if hello["t"] != "hello" || hello["write"] != false {
@@ -181,7 +184,7 @@ func TestPortalBridgeConfinesPaths(t *testing.T) {
 	}
 	startBridge(t, f.srv.URL, root)
 	conn := f.accept(t)
-	defer conn.Close()
+	defer conn.CloseNow()
 	recvJSON(t, conn)
 
 	// A textual escape is re-rooted, not followed: ../../secret.txt reads
@@ -205,7 +208,7 @@ func TestPortalBridgeCapsAndUnknownTools(t *testing.T) {
 	}
 	startBridge(t, f.srv.URL, root)
 	conn := f.accept(t)
-	defer conn.Close()
+	defer conn.CloseNow()
 	recvJSON(t, conn)
 
 	res := callTool(t, conn, "c1", "read_bytes", map[string]any{"path": "big.bin"})
@@ -224,10 +227,10 @@ func TestPortalBridgeReconnects(t *testing.T) {
 	startBridge(t, f.srv.URL, portalRoot(t))
 	first := f.accept(t)
 	recvJSON(t, first)
-	first.Close()
+	first.CloseNow()
 
 	second := f.accept(t)
-	defer second.Close()
+	defer second.CloseNow()
 	hello := recvJSON(t, second)
 	if hello["t"] != "hello" {
 		t.Fatalf("no hello after reconnect: %v", hello)

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 func TestAppPairsWithExternalDriverLikeTheRelay(t *testing.T) {
@@ -43,7 +43,7 @@ func TestAppPairsWithExternalDriverLikeTheRelay(t *testing.T) {
 		t.Fatalf("relayed response = %v", res)
 	}
 
-	d.ws.Close()
+	d.ws.CloseNow()
 	notes = app.waitNotifications(2)
 	if len(notes) != 2 || notes[1] != "DriverDisconnectedNotification" {
 		t.Fatalf("app should hear the driver leave, got %v", notes)
@@ -77,8 +77,9 @@ func TestInternalAndExternalDriversDoNotMix(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Nothing else may reach the external driver.
-	d.ws.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-	if _, _, err := d.ws.ReadMessage(); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, _, err := d.ws.Read(ctx); err == nil {
 		t.Fatal("the internal driver's response leaked to the external driver")
 	}
 
@@ -159,8 +160,7 @@ func TestAppLossCloses4002AndPendingCalls(t *testing.T) {
 	app.close()
 
 	_, err := d.read()
-	var ce *websocket.CloseError
-	if !errors.As(err, &ce) || ce.Code != 4002 {
+	if websocket.CloseStatus(err) != 4002 {
 		t.Fatalf("external driver should be closed with 4002, got %v", err)
 	}
 	if err := <-done; err == nil {

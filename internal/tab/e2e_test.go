@@ -1,6 +1,7 @@
 package tab
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 
 	"github.com/eordano/recgo/internal/proc"
 )
@@ -132,20 +133,20 @@ func newFixture(t *testing.T) *fixture {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	mux.HandleFunc("/hmr", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := up.Upgrade(w, r, nil)
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {
 			return
 		}
-		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"connected"}`))
+		conn.SetReadLimit(-1)
+		conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"connected"}`))
 		f.mu.Lock()
 		f.socks = append(f.socks, conn)
 		f.mu.Unlock()
 
 		go func() {
 			for {
-				if _, _, err := conn.ReadMessage(); err != nil {
+				if _, _, err := conn.Read(context.Background()); err != nil {
 					return
 				}
 			}
@@ -156,7 +157,7 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(func() {
 		f.mu.Lock()
 		for _, c := range f.socks {
-			c.Close()
+			c.CloseNow()
 		}
 		f.mu.Unlock()
 		f.server.Close()
@@ -168,7 +169,7 @@ func (f *fixture) broadcast(payload string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, c := range f.socks {
-		c.WriteMessage(websocket.TextMessage, []byte(payload))
+		c.Write(context.Background(), websocket.MessageText, []byte(payload))
 	}
 }
 

@@ -76,6 +76,8 @@ def test_accept_then_leave_stops_only_owned_recording(watcher):
     assert w.rec.stops == 0
     w.update(snapshot(empty=True))
     assert w.rec.stops == 1
+    w.update(dict(snapshot(empty=True), browser=False))
+    assert w.rec.stops == 1 and w.status == "nothing on port 9222"
 
 
 def test_manual_stop_does_not_reprompt_or_stop_next_manual_recording(watcher):

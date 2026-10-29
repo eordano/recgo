@@ -1,9 +1,11 @@
 import html
+import os
+import shutil
 import subprocess
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPen,
-                           QPixmap)
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence, QPainter,
+                           QPainterPath, QPen, QPixmap)
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QAbstractButton, QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout,
                                QWidget)
@@ -349,6 +351,21 @@ def reveal(path):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         open_path(path)
+
+
+def copy_text(text):
+    """KWin ignores a Wayland selection set by a client without keyboard focus,
+    which is recgo's state when a notification button is pressed; wl-copy
+    sets it through the data-control protocol instead."""
+    wl_copy = os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy")
+    if wl_copy:
+        try:
+            subprocess.Popen([wl_copy, "--", text], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except OSError:
+            pass
+    QGuiApplication.clipboard().setText(text)
 
 
 def tray_pixmap(state, size=64):

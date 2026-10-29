@@ -1,25 +1,7 @@
 from PySide6.QtGui import QGuiApplication
 
-from PySide6.QtGui import QGuiApplication
-
 from recgo_app import kwin
 from recgo_app.recorder import Recorder
-from recgo_app.settings import AppSettings
-
-
-def on_wayland():
-    return QGuiApplication.platformName().startswith("wayland")
-
-
-def saved_hud_pos():
-    saved = AppSettings.shared().geometry("hud")
-    if not saved:
-        return None
-    try:
-        x, y = (int(v) for v in str(saved).split(","))
-    except ValueError:
-        return None
-    return (x, y)
 from recgo_app.settings import AppSettings
 
 

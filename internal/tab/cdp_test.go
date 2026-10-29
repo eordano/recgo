@@ -1,6 +1,7 @@
 package tab
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,7 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 type fakeCDPServer struct {
@@ -26,24 +28,18 @@ type fakeCDPServer struct {
 func newFakeCDP(t *testing.T) *fakeCDPServer {
 	t.Helper()
 	f := &fakeCDPServer{}
-	up := websocket.Upgrader{
-		ReadBufferSize:  1 << 20,
-		WriteBufferSize: 1 << 20,
-		CheckOrigin:     func(*http.Request) bool { return true },
-	}
-
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := up.Upgrade(w, r, nil)
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {
 			return
 		}
-		conn.SetReadLimit(0)
+		conn.SetReadLimit(-1)
 		f.mu.Lock()
 		f.conns = append(f.conns, conn)
 		f.mu.Unlock()
 
 		for {
-			_, data, err := conn.ReadMessage()
+			_, data, err := conn.Read(r.Context())
 			if err != nil {
 				return
 			}
@@ -71,7 +67,7 @@ func (f *fakeCDPServer) wsURL() string {
 func (f *fakeCDPServer) send(conn *websocket.Conn, v any) {
 	f.writeMu.Lock()
 	defer f.writeMu.Unlock()
-	conn.WriteJSON(v)
+	wsjson.Write(context.Background(), conn, v)
 }
 
 func (f *fakeCDPServer) broadcast(v any) {
@@ -289,7 +285,7 @@ func TestSendAsyncDoesNotWaitForAReply(t *testing.T) {
 func TestPendingCallsFailWhenConnectionDrops(t *testing.T) {
 	f := newFakeCDP(t)
 	f.handler = func(conn *websocket.Conn, msg map[string]any) {
-		conn.Close()
+		conn.CloseNow()
 	}
 	c := dialFake(t, f)
 

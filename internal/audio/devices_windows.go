@@ -37,6 +37,10 @@ func GetDefaultSource() (string, error) {
 	return "", fmt.Errorf("no dshow audio device found (ffmpeg -list_devices true -f dshow -i dummy lists none)")
 }
 
+func DefaultMic() (string, error) { return GetDefaultSource() }
+
+func preferLiveMic(devices []Device, def *Device) *Device { return def }
+
 func GetDefaultSink() (string, error) { return "", nil }
 
 // DefaultMonitor is the sound card's own loopback pin when it exists;
@@ -86,16 +90,6 @@ func ListAllDevices() (mics []Device, monitors []Device, err error) {
 		}
 	}
 	return mics, monitors, nil
-}
-
-type VirtualSink struct{}
-
-func (v *VirtualSink) Cleanup() {}
-
-func NeedsVirtualSink(monitorName string) bool { return false }
-
-func NewVirtualSink(realSinkName string) (*VirtualSink, string, error) {
-	return nil, "", fmt.Errorf("virtual sink not supported on windows")
 }
 
 func CleanupOrphanedVirtualSinks() {}

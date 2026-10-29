@@ -5,6 +5,7 @@ package audio
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -23,7 +24,11 @@ func installSwitchAudioSourceShim(t *testing.T, initial string) string {
 	statePath := filepath.Join(dir, "state")
 	writeShimState(t, statePath, initial)
 
-	shim := "#!/bin/sh\n/bin/cat " + statePath + "\n"
+	cat, err := exec.LookPath("cat")
+	if err != nil {
+		t.Fatalf("cat not on PATH: %v", err)
+	}
+	shim := "#!/bin/sh\n" + cat + " " + statePath + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "SwitchAudioSource"), []byte(shim), 0755); err != nil {
 		t.Fatalf("write shim: %v", err)
 	}

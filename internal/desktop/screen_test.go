@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"bytes"
+	"github.com/eordano/recgo/internal/sessioncli"
 	"strings"
 	"testing"
 
@@ -90,7 +91,7 @@ func TestPrintScreensIsOneLinePerDisplay(t *testing.T) {
 }
 
 func TestRequiredSystemAudioRejectsInvalidSetupBeforeCapture(t *testing.T) {
-	for _, o := range []opts{{requireSystemAudio: true}, {requireSystemAudio: true, systemAudio: "default", noAudio: true}} {
+	for _, o := range []opts{{requireSystemAudio: true}, {requireSystemAudio: true, Options: sessioncli.Options{SystemAudio: "default", NoAudio: true}}} {
 		if err := run(o); err == nil || !strings.Contains(err.Error(), "system audio required") {
 			t.Fatalf("got %v", err)
 		}

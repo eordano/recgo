@@ -9,6 +9,7 @@
   systemd,
   xdg-utils,
   chromium,
+  wl-clipboard,
   recgo ? callPackage ../. { },
 }:
 
@@ -81,6 +82,7 @@ python3.pkgs.buildPythonApplication {
           systemd
           xdg-utils
           chromium
+          wl-clipboard
         ]
       }
       --set RECGO_HELPERS ${recgo}/bin

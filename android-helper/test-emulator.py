@@ -2,7 +2,6 @@
 """Opt-in end-to-end test on an already booted, consented emulator. No physical phones."""
 import argparse
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile

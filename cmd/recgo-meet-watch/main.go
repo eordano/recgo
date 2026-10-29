@@ -33,21 +33,24 @@ func main() {
 		probeCtx, done := context.WithTimeout(ctx, 5*time.Second)
 		calls, err := meet.Probe(probeCtx, *port)
 		done()
-		s := tracker.Update(time.Now(), calls, err == nil)
+		if *once {
+			s := meet.Classify(calls, err)
+			if enc.Encode(s) != nil {
+				return
+			}
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+			}
+			if !s.Available {
+				os.Exit(1)
+			}
+			return
+		}
+		s := tracker.Observe(time.Now(), calls, err)
 		if time.Since(started) < 10*time.Second {
 			s.Available = false
 		}
-		if *once {
-			s = meet.Snapshot{Available: err == nil, Calls: calls}
-		}
 		if enc.Encode(s) != nil {
-			return
-		}
-		if *once {
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
 			return
 		}
 		select {

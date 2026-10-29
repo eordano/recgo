@@ -11,16 +11,18 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
+
+	"github.com/eordano/recgo/internal/logging"
 )
 
 type paSource struct {
-	Index       int    `json:"index"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	State       string `json:"state"`
+	Index       int               `json:"index"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	State       string            `json:"state"`
+	Properties  map[string]string `json:"properties"`
 }
 
 type paSink struct {
@@ -74,16 +76,27 @@ func DefaultMonitor() (string, error) {
 
 type paSourceOutput struct {
 	Index      int               `json:"index"`
+	Source     int               `json:"source"`
+	Corked     bool              `json:"corked"`
 	Properties map[string]string `json:"properties"`
 }
 
-func findSourceOutput(streamName string, pid int) (int, error) {
-	out, err := runPactl("--format=json", "list", "source-outputs")
+type paCard struct {
+	Name          string `json:"name"`
+	ActiveProfile string `json:"active_profile"`
+}
+
+func pactlList(what string, into any) error {
+	out, err := runPactl("--format=json", "list", what)
 	if err != nil {
-		return 0, err
+		return err
 	}
+	return json.Unmarshal([]byte(out), into)
+}
+
+func findSourceOutput(streamName string, pid int) (int, error) {
 	var outputs []paSourceOutput
-	if err := json.Unmarshal([]byte(out), &outputs); err != nil {
+	if err := pactlList("source-outputs", &outputs); err != nil {
 		return 0, err
 	}
 	for _, o := range outputs {
@@ -115,46 +128,40 @@ func SetStreamMuted(streamName string, pid int, muted bool) error {
 	return err
 }
 
-func ListSources() ([]Device, error) {
-	out, err := runPactl("--format=json", "list", "sources")
-	if err != nil {
-		return nil, err
+func sourceType(name string) DeviceType {
+	if strings.HasSuffix(name, ".monitor") {
+		return DeviceTypeMonitor
 	}
+	return DeviceTypeMic
+}
 
-	var sources []paSource
-	if err := json.Unmarshal([]byte(out), &sources); err != nil {
-		return nil, err
-	}
-
-	defaultSource, _ := GetDefaultSource()
-
+func sourceDevices(sources []paSource, defaultSource string) []Device {
 	devices := make([]Device, 0, len(sources))
 	for _, src := range sources {
-		devType := DeviceTypeMic
-		if strings.HasSuffix(src.Name, ".monitor") {
-			devType = DeviceTypeMonitor
-		}
 		devices = append(devices, Device{
 			Name:        src.Name,
 			Description: src.Description,
-			Type:        devType,
+			Type:        sourceType(src.Name),
 			IsDefault:   src.Name == defaultSource,
 			Index:       src.Index,
 			State:       src.State,
 		})
 	}
+	return devices
+}
 
-	return devices, nil
+func ListSources() ([]Device, error) {
+	var sources []paSource
+	if err := pactlList("sources", &sources); err != nil {
+		return nil, err
+	}
+	defaultSource, _ := GetDefaultSource()
+	return sourceDevices(sources, defaultSource), nil
 }
 
 func ListSinks() ([]Device, error) {
-	out, err := runPactl("--format=json", "list", "sinks")
-	if err != nil {
-		return nil, err
-	}
-
 	var sinks []paSink
-	if err := json.Unmarshal([]byte(out), &sinks); err != nil {
+	if err := pactlList("sinks", &sinks); err != nil {
 		return nil, err
 	}
 
@@ -192,13 +199,122 @@ func ListAllDevices() (mics []Device, monitors []Device, err error) {
 	return mics, monitors, nil
 }
 
-type VirtualSink struct {
-	nullModuleID     string
-	loopbackModuleID string
-	originalSink     string
-	sinkName         string
-	mu               sync.Mutex
-	cleaned          bool
+// DefaultMic is the source a recording without an explicit mic captures.
+func DefaultMic() (string, error) {
+	name, err := GetDefaultSource()
+	if err != nil || !mayAutoswitchProfile(&Device{Name: name, Type: sourceType(name)}) {
+		return name, err
+	}
+	sources, err := ListSources()
+	if err != nil {
+		return name, nil
+	}
+	for i := range sources {
+		if sources[i].Name == name {
+			return preferLiveMic(sources, &sources[i]).Name, nil
+		}
+	}
+	return name, nil
+}
+
+// WirePlumber's bluetooth.autoswitch-to-headset-profile exposes a headset's
+// mic as a bluez_input.* loopback even while the headset plays A2DP. Opening
+// it switches the headset to HSP/HFP: what it plays drops to mono call audio
+// and its sink is torn down under every stream playing to it. When exactly
+// one other mic is already held open (the call's), that is what the other
+// side hears, so record it and leave the headset alone.
+func preferLiveMic(devices []Device, def *Device) *Device {
+	return preferLiveMicWith(devices, def, readMicRouting)
+}
+
+func mayAutoswitchProfile(d *Device) bool {
+	return d != nil && d.Type == DeviceTypeMic && strings.HasPrefix(d.Name, "bluez_input.")
+}
+
+func preferLiveMicWith(devices []Device, def *Device, read func() (micRouting, error)) *Device {
+	if !mayAutoswitchProfile(def) {
+		return def
+	}
+	r, err := read()
+	if err != nil {
+		logging.Log("mic: keeping %s, reading the audio graph failed: %v", def.Name, err)
+		return def
+	}
+	pick := pickLiveMic(devices, def, r)
+	if pick != def {
+		logging.Log("mic: recording %s, which another app holds open, instead of %s, which would switch the headset out of A2DP", pick.Name, def.Name)
+	}
+	return pick
+}
+
+type micRouting struct {
+	sources []paSource
+	cards   []paCard
+	outputs []paSourceOutput
+}
+
+func readMicRouting() (micRouting, error) {
+	var r micRouting
+	if err := pactlList("sources", &r.sources); err != nil {
+		return r, err
+	}
+	if err := pactlList("cards", &r.cards); err != nil {
+		return r, err
+	}
+	return r, pactlList("source-outputs", &r.outputs)
+}
+
+// Several held mics are not guessed between: the wrong one could record a
+// conversation the user never meant to capture.
+func pickLiveMic(devices []Device, def *Device, r micRouting) *Device {
+	if !switchesHeadsetProfile(def.Name, r) {
+		return def
+	}
+	names := make(map[int]string, len(r.sources))
+	for _, s := range r.sources {
+		names[s.Index] = s.Name
+	}
+	var pick *Device
+	for _, o := range r.outputs {
+		if o.Properties["stream.monitor"] == "true" {
+			continue
+		}
+		d := findMic(devices, names[o.Source])
+		if d == nil || strings.HasPrefix(d.Name, "bluez_") || d == pick {
+			continue
+		}
+		if pick != nil {
+			return def
+		}
+		pick = d
+	}
+	if pick == nil {
+		return def
+	}
+	return pick
+}
+
+func switchesHeadsetProfile(source string, r micRouting) bool {
+	for _, s := range r.sources {
+		if s.Name != source || s.Properties["bluez5.loopback"] != "true" {
+			continue
+		}
+		for _, c := range r.cards {
+			if c.Name == s.Properties["device.name"] {
+				return strings.HasPrefix(c.ActiveProfile, "a2dp")
+			}
+		}
+	}
+	return false
+}
+
+func findMic(devices []Device, name string) *Device {
+	for i := range devices {
+		if devices[i].Name == name && devices[i].Type == DeviceTypeMic {
+			return &devices[i]
+		}
+	}
+	return nil
 }
 
 type virtualSinkState struct {
@@ -231,6 +347,8 @@ func runPactl(args ...string) (string, error) {
 	return runCmd(ctx, cmd)
 }
 
+// CleanupOrphanedVirtualSinks undoes the Bluetooth null sink + loopback an
+// older recgo left behind when it died mid-recording; recgo no longer makes one.
 func CleanupOrphanedVirtualSinks() {
 	statePath, err := getStateFilePath()
 	if err != nil {
@@ -272,144 +390,4 @@ func isProcessRunning(pid int) bool {
 		return false
 	}
 	return process.Signal(syscall.Signal(0)) == nil
-}
-
-func (v *VirtualSink) saveState() error {
-	state := virtualSinkState{
-		PID:              os.Getpid(),
-		SinkName:         v.sinkName,
-		NullModuleID:     v.nullModuleID,
-		LoopbackModuleID: v.loopbackModuleID,
-		OriginalSink:     v.originalSink,
-	}
-
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	statePath, err := getStateFilePath()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(statePath), 0755); err != nil {
-		return err
-	}
-
-	return os.WriteFile(statePath, data, 0644)
-}
-
-func removeState() {
-	if statePath, err := getStateFilePath(); err == nil {
-		os.Remove(statePath)
-	}
-}
-
-func IsBluetoothMonitor(deviceName string) bool {
-	return strings.HasPrefix(strings.TrimSuffix(deviceName, ".monitor"), "bluez_")
-}
-
-func NeedsVirtualSink(monitorName string) bool {
-	return IsPipeWireRunning() && IsBluetoothMonitor(monitorName)
-}
-
-func NewVirtualSink(realSinkName string) (*VirtualSink, string, error) {
-	CleanupOrphanedVirtualSinks()
-
-	originalDefault, err := runPactl("get-default-sink")
-	if err != nil || IsOwnSink(originalDefault) {
-		originalDefault = realSinkName
-	}
-
-	sinkName := sinkNamePrefix + "_" + strconv.Itoa(os.Getpid())
-
-	nullModuleID, err := runPactl("load-module", "module-null-sink",
-		"sink_name="+sinkName,
-		"sink_properties=device.description=RecgoRecordSink")
-	if err != nil {
-		return nil, "", fmt.Errorf("load null sink: %w", err)
-	}
-
-	loopbackModuleID, err := runPactl("load-module", "module-loopback",
-		"source="+sinkName+".monitor",
-		"sink="+realSinkName,
-		"latency_msec=30")
-	if err != nil {
-		runPactl("unload-module", nullModuleID)
-		return nil, "", fmt.Errorf("load loopback: %w", err)
-	}
-
-	if _, err := runPactl("set-default-sink", sinkName); err != nil {
-		runPactl("unload-module", loopbackModuleID)
-		runPactl("unload-module", nullModuleID)
-		return nil, "", fmt.Errorf("set default sink: %w", err)
-	}
-
-	vs := &VirtualSink{
-		nullModuleID:     nullModuleID,
-		loopbackModuleID: loopbackModuleID,
-		originalSink:     originalDefault,
-		sinkName:         sinkName,
-	}
-
-	if err := vs.saveState(); err != nil {
-		fmt.Fprintf(os.Stderr, "recgo: warning: failed to save state: %v\n", err)
-	}
-
-	monitorSource := sinkName + ".monitor"
-
-	if err := WaitForSource(monitorSource, 2*time.Second); err != nil {
-		fmt.Fprintf(os.Stderr, "recgo: warning: %v\n", err)
-	}
-
-	return vs, monitorSource, nil
-}
-
-func (v *VirtualSink) Cleanup() {
-	if v == nil {
-		return
-	}
-
-	v.mu.Lock()
-	if v.cleaned {
-		v.mu.Unlock()
-		return
-	}
-	v.cleaned = true
-	v.mu.Unlock()
-
-	if v.originalSink != "" {
-		if _, err := runPactl("set-default-sink", v.originalSink); err != nil {
-			fmt.Fprintf(os.Stderr, "recgo: failed to restore default sink: %v\n", err)
-		}
-	}
-
-	if v.loopbackModuleID != "" {
-		if _, err := runPactl("unload-module", v.loopbackModuleID); err != nil {
-			fmt.Fprintf(os.Stderr, "recgo: failed to unload loopback: %v\n", err)
-		}
-	}
-	if v.nullModuleID != "" {
-		if _, err := runPactl("unload-module", v.nullModuleID); err != nil {
-			fmt.Fprintf(os.Stderr, "recgo: failed to unload null sink: %v\n", err)
-		}
-	}
-
-	removeState()
-}
-
-func WaitForSource(sourceName string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		sources, err := ListSources()
-		if err == nil {
-			for _, src := range sources {
-				if src.Name == sourceName {
-					return nil
-				}
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("source %q not found after %v", sourceName, timeout)
 }

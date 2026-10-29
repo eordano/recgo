@@ -7,7 +7,7 @@ import Foundation
 final class MeetWatcher: NSObject, NSWindowDelegate {
     static let shared = MeetWatcher()
     struct Call: Decodable { let id: String; let url: String; let present: Bool; let title: String? }
-    struct Snapshot: Decodable { let available: Bool; let calls: [Call] }
+    struct Snapshot: Decodable { let available: Bool; let browser: Bool?; let calls: [Call] }
 
     private var process: Process?
     private var output: Pipe?
@@ -99,7 +99,7 @@ final class MeetWatcher: NSObject, NSWindowDelegate {
     private func update(_ snapshot: Snapshot) {
         guard AppSettings.shared.meetPrompt else { return }
         lastUpdate = Date()
-        status = snapshot.available ? "watching" : "browser unavailable"
+        status = !snapshot.available ? "browser unavailable" : snapshot.browser == false ? "nothing on port 9222" : "watching"
         calls = snapshot.available ? Dictionary(snapshot.calls.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) : [:]
         if snapshot.available {
             prompted.formIntersection(Set(calls.keys))
@@ -120,7 +120,7 @@ final class MeetWatcher: NSObject, NSWindowDelegate {
     private func showPrompt(_ call: Call) {
         let box = NSAlert()
         box.messageText = "Record this Meet call?"
-        box.informativeText = call.url + "\n\nRecords your microphone and system audio, then stops when you leave. Uses your transcription and sharing settings. System audio needs a configured loopback device on this Mac."
+        box.informativeText = call.url + "\n\nRecords your microphone and system audio, then stops when you leave the call, close its tab or quit the browser. Uses your transcription and sharing settings. System audio needs a configured loopback device on this Mac."
         // Not now is deliberately the default, including Return and Escape.
         let no = box.addButton(withTitle: "Not now")
         no.target = self

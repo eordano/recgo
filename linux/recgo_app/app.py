@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from recgo_app import APP_ID, APP_NAME
 from recgo_app.hotkeys import HotkeyAction, Hotkeys
 from recgo_app.meet import MeetWatcher
-from recgo_app.recorder import Phase, Recorder
+from recgo_app.recorder import Phase, Recorder, upload_summary
 from recgo_app.settings import AppSettings, RecordMode
 from recgo_app.theme import apply_dark
 from recgo_app.tray import Actions, TrayController
@@ -151,11 +151,11 @@ class App:
         if directory and self.rec.finished_is_file:
             body = os.path.basename(directory)
             if self.rec.uploaded:
-                body += "\nuploaded to " + self.rec.uploaded
-            self.tray.notify("Recording saved", body)
+                body += "\n" + upload_summary(self.rec.uploaded)
+            self.tray.notify("Recording saved", body, path=directory)
         elif directory:
             title = os.path.basename(directory)
-            self.tray.notify("Session packed", title)
+            self.tray.notify("Session packed", title, path=directory)
             self.windows.show_library(selecting=title)
         elif self.rec.last_error:
             info = self.rec.last_error
@@ -267,6 +267,7 @@ def main(argv):
     qapp.setDesktopFileName(APP_ID)
     qapp.setWindowIcon(QIcon(app_icon_pixmap()))
     qapp.setQuitOnLastWindowClosed(False)
+    qapp.setQuitLockEnabled(False)
     apply_dark(qapp)
     if forward(args or ["--library"]):
         return 0

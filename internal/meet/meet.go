@@ -6,17 +6,19 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 //go:embed detect.js
@@ -39,9 +41,17 @@ type Call struct {
 }
 
 type Snapshot struct {
-	Available bool   `json:"available"`
-	Calls     []Call `json:"calls"`
+	Available bool `json:"available"`
+	// Browser is false only for ErrNoBrowser: nothing listens on the
+	// debugging port, so every call it hosted is confirmed gone. A debugger
+	// that answers but fails leaves Browser true with Available false.
+	Browser bool   `json:"browser"`
+	Calls   []Call `json:"calls"`
 }
+
+// ErrNoBrowser means the debugging port refused the connection. Unlike
+// other probe errors it is not an outage: the browser has quit.
+var ErrNoBrowser = errors.New("no browser on the debugging port")
 
 type target struct {
 	ID    string `json:"id"`
@@ -70,7 +80,8 @@ func SuggestTitle(tabTitle, canonical string) string {
 }
 
 // Probe keeps unknown separate from absent: a debugger outage must not end a
-// recording. Only page targets on the exact Meet origin are inspected.
+// recording, but a refused connection (ErrNoBrowser) is a quit browser, not
+// an outage. Only page targets on the exact Meet origin are inspected.
 func Probe(ctx context.Context, port int) ([]Call, error) {
 	endpoint := fmt.Sprintf("127.0.0.1:%d", port)
 	req, err := http.NewRequestWithContext(ctx, "GET", "http://"+endpoint+"/json/list", nil)
@@ -79,6 +90,9 @@ func Probe(ctx context.Context, port int) ([]Call, error) {
 	}
 	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	res, err := client.Do(req)
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return nil, ErrNoBrowser
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -117,20 +131,17 @@ func Probe(ctx context.Context, port int) ([]Call, error) {
 }
 
 func evaluate(ctx context.Context, endpoint string) (bool, error) {
-	d := websocket.Dialer{HandshakeTimeout: 2 * time.Second, NetDialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext}
-	c, _, err := d.DialContext(ctx, endpoint, nil)
+	dctx, dcancel := context.WithTimeout(ctx, 2*time.Second)
+	c, _, err := websocket.Dial(dctx, endpoint, nil)
+	dcancel()
 	if err != nil {
 		return false, err
 	}
-	defer c.Close()
+	defer c.CloseNow()
 	c.SetReadLimit(64 << 10)
-	deadline := time.Now().Add(2 * time.Second)
-	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
-		deadline = end
-	}
-	c.SetReadDeadline(deadline)
-	c.SetWriteDeadline(deadline)
-	err = c.WriteJSON(map[string]any{"id": 1, "method": "Runtime.evaluate", "params": map[string]any{"expression": Expression, "returnByValue": true, "silent": true, "timeout": 1000}})
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	err = wsjson.Write(ctx, c, map[string]any{"id": 1, "method": "Runtime.evaluate", "params": map[string]any{"expression": Expression, "returnByValue": true, "silent": true, "timeout": 1000}})
 	if err != nil {
 		return false, err
 	}
@@ -145,7 +156,7 @@ func evaluate(ctx context.Context, endpoint string) (bool, error) {
 				Exception json.RawMessage `json:"exceptionDetails"`
 			} `json:"result"`
 		}
-		if err := c.ReadJSON(&msg); err != nil {
+		if err := wsjson.Read(ctx, c, &msg); err != nil {
 			return false, err
 		}
 		if msg.ID != 1 {
@@ -216,5 +227,23 @@ func (t *Tracker) Update(now time.Time, calls []Call, available bool) Snapshot {
 		}
 	}
 	sort.Slice(s.Calls, func(i, j int) bool { return s.Calls[i].ID < s.Calls[j].ID })
+	return s
+}
+
+// Classify maps one Probe result to a snapshot without debounce: ErrNoBrowser
+// is confirmed absence, any other error is unknown.
+func Classify(calls []Call, err error) Snapshot {
+	s := Snapshot{Available: err == nil || errors.Is(err, ErrNoBrowser), Browser: !errors.Is(err, ErrNoBrowser), Calls: calls}
+	if s.Calls == nil {
+		s.Calls = []Call{}
+	}
+	return s
+}
+
+// Observe feeds one Probe result through Classify and the debounce.
+func (t *Tracker) Observe(now time.Time, calls []Call, err error) Snapshot {
+	c := Classify(calls, err)
+	s := t.Update(now, c.Calls, c.Available)
+	s.Browser = c.Browser
 	return s
 }

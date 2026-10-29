@@ -24,7 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 const (
@@ -143,17 +144,16 @@ func (b *PortalBridge) run(ctx context.Context) {
 }
 
 func (b *PortalBridge) serve(ctx context.Context) error {
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, b.url, nil)
+	dctx, dcancel := context.WithTimeout(ctx, 45*time.Second)
+	conn, _, err := websocket.Dial(dctx, b.url, nil)
+	dcancel()
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	// The connection dies with the recording: without this, a read blocked
-	// on an idle server would outlive Close and the deferred cleanup order.
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
-	defer stop()
+	defer conn.CloseNow()
+	conn.SetReadLimit(-1)
 
-	if err := conn.WriteJSON(map[string]any{
+	if err := wsjson.Write(ctx, conn, map[string]any{
 		"t": "hello", "root": b.root, "write": false,
 		"caps": []string{"fs"}, "tools": portalTools(),
 	}); err != nil {
@@ -168,7 +168,7 @@ func (b *PortalBridge) serve(ctx context.Context) error {
 			Name  string          `json:"name"`
 			Input json.RawMessage `json:"input"`
 		}
-		if err := conn.ReadJSON(&msg); err != nil {
+		if err := wsjson.Read(ctx, conn, &msg); err != nil {
 			return fmt.Errorf("bridge read: %w", err)
 		}
 		if msg.T != "tool_call" {
@@ -180,7 +180,7 @@ func (b *PortalBridge) serve(ctx context.Context) error {
 			reply["content"] = err.Error()
 			reply["is_error"] = true
 		}
-		if err := conn.WriteJSON(reply); err != nil {
+		if err := wsjson.Write(ctx, conn, reply); err != nil {
 			return err
 		}
 	}

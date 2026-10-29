@@ -134,7 +134,7 @@ func TestNetworkEgressIsConfinedToTheSTTBackend(t *testing.T) {
 
 	for file, imports := range packageImports(t, ".") {
 		for _, imp := range imports {
-			if strings.Contains(imp, "gorilla/websocket") && !websocketAllowed[file] {
+			if strings.Contains(imp, "coder/websocket") && !websocketAllowed[file] {
 				t.Errorf("%s imports %s — websocket egress belongs in cdp.go and portal.go only", file, imp)
 			}
 			if imp != "net/http" && imp != "net" && !strings.Contains(imp, "internal/transcribe") {

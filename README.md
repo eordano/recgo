@@ -20,7 +20,8 @@ element metadata, with opt-in screenshots, scrcpy video, app logs and narration.
   `hearing:`, `error:`, `wrote PATH`, `Uploaded to`), SIGINT or `q` on stdin to
   stop, `t` / `transcribe on|off` on stdin like the key, `-mic`/`-system-audio`
   to pin a device and `-transcribe` to start with it on. The desktop apps' Audio
-  only mode is this.
+  only mode is this. `-mic` always wins; without it the microphone follows the
+  default rule under [Architecture](#architecture), and `mic:` names the one opened.
 
 ## macOS
 
@@ -46,7 +47,7 @@ has no monitor sources.
 | `recgo-alttester` (desktop capture + Unity element under each click) | works on KDE Plasma | same grants as `recgo-desktop`, plus the dev build launched with `--alttester 127.0.0.1:13000` dialing recgo; see [RECGO-ALTTESTER.md](RECGO-ALTTESTER.md) |
 | `recgo-window` (one screen, picked at start) | works | same grants as `recgo-desktop`; `-screen N` (numbers from `-list-screens`, or `main`) skips the terminal prompt, which is how the app passes its picker's choice |
 | `recgo-browser` / `recgo-tab` | works, no TCC | a Chromium-family browser; auto-discovers Chromium/Chrome/Brave/Edge app bundles when `--chromium` is unset |
-| Session default out dir | guarded | Linux and Windows: `~/walk-and-talk` (or `[recording] output_dir` from config.toml); macOS: `~/Documents/walk-and-talk`, falling back to `~/walk-and-talk` with a warning when Documents is iCloud-synced (all three session CLIs and the app) |
+| Session default out dir | guarded | Linux and Windows: `~/walk-and-talk` (or `[recording] sessions_dir` from config.toml); macOS: `~/Documents/walk-and-talk`, falling back to `~/walk-and-talk` with a warning when Documents is iCloud-synced (all three session CLIs and the app) |
 
 ### System audio: BlackHole + Multi-Output Device
 
@@ -120,8 +121,8 @@ mouse hook. Nothing needs a permission prompt.
 | Frame history (`-before` / `-after` shots, `— screen did not repaint`) | absent | like macOS there is no frame pump: each shot is one screenshot at the instant, so the repaint evidence never appears and the `-before` / `-after` siblings carry a note instead of a file |
 | `recgo-window` (one screen, picked at start) | works | `-screen N` from `-list-screens` (EnumDisplayMonitors order), or `main`; one display needs no prompt |
 | `recgo-browser` / `recgo-tab` | works | a Chromium-family browser; Chrome, Edge, Brave and Chromium are auto-discovered under Program Files and LocalAppData when `--chromium` is unset |
-| `recgo` (the TUI) | audio only, degraded | compiles and records through dshow, but the live system-audio toggle, virtual sinks and the default-output watcher are PipeWire/PulseAudio features and report themselves unsupported |
-| Session default out dir | `%USERPROFILE%\walk-and-talk` | or `[recording] output_dir` in `%USERPROFILE%\.config\recgo\config.toml` (XDG layout on Windows too) |
+| `recgo` (the TUI) | audio only, degraded | compiles and records through dshow, but the live system-audio toggle and the default-output watcher are PipeWire/PulseAudio features and report themselves unsupported |
+| Session default out dir | `%USERPROFILE%\walk-and-talk` | or `[recording] sessions_dir` in `%USERPROFILE%\.config\recgo\config.toml` (XDG layout on Windows too) |
 
 ### Interactive session only
 
@@ -192,7 +193,15 @@ ffmpeg runs as a subprocess capturing from PulseAudio/PipeWire (avfoundation
 on macOS) into the output file; its stderr progress lines are parsed into a
 channel that drives the stats panel. Devices come from
 `LC_NUMERIC=C pactl --format=json list sources/sinks` plus
-`pactl get-default-source` / `-sink`.
+`pactl get-default-source` / `-sink`. When no mic is named, recgo records the
+default source, except when that default is a Bluetooth headset's microphone
+(WirePlumber's autoswitch source) and the headset is playing in high quality
+(A2DP): opening it would switch the headset to call mode (HSP/HFP), dropping
+what you hear to mono call audio and briefly cutting playback. Then, if exactly
+one other microphone is already held open by an app (normally your call's;
+level meters do not count), recgo records that one instead; with none or
+several it records the headset's microphone. A named mic (`-mic`, or the
+desktop app's Microphone device setting) always wins.
 
 Live transcription has two modes. Local runs ffmpeg's `whisper` audio filter
 (`-af "whisper=model=<ggml model>:language=…:queue=…:destination=…:format=srt"`),
@@ -210,7 +219,8 @@ Config file: `$XDG_CONFIG_HOME/recgo/config.toml`
 
 ```toml
 [recording]
-output_dir = "~/archive/recordings"
+output_dir = "~/archive/recordings"   # recgo <name>: audio recordings
+sessions_dir = "~/walk-and-talk"      # recgo-tab/-browser/-desktop and the apps' sessions
 format = "mkv"           # mkv, opus, wav
 audio_codec = "aac"      # aac, opus, flac
 bitrate = "128k"
@@ -240,8 +250,8 @@ theme = "dark"           # dark, light
 [watchdog]
 # Auto-recover a dead system-audio (monitor) capture mid-recording. If the
 # monitor track flatlines at/below silence_db for silence_window, recgo
-# re-resolves the default devices and restarts the capture (rebuilding the
-# null-sink/loopback). Guards against restart storms on a genuinely silent call.
+# re-resolves the default devices and restarts the capture. Guards against
+# restart storms on a genuinely silent call.
 enabled = true
 silence_db = -90.0       # dB floor treated as "dead" (≈16-bit noise floor; raise toward -75 to also catch barely-alive tracks)
 silence_window = "30s"   # flatline duration before re-calibrating
@@ -274,7 +284,7 @@ max_attempts = 3         # consecutive attempts before giving up until audio ret
 - `github.com/charmbracelet/bubbles` - UI components
 - `github.com/charmbracelet/lipgloss` - Styling
 - `github.com/BurntSushi/toml` - Config parsing
-- `github.com/gorilla/websocket` - CDP connection (recgo-tab/browser)
+- `github.com/coder/websocket` - CDP, portal, Meet probe and AltTester connections
 - `github.com/godbus/dbus/v5` - KDE screenshot portal (recgo-desktop)
 
 ### System Requirements
@@ -327,9 +337,12 @@ UI, so this DOM check needs revisiting if prompts stop appearing.
 - **Record call** starts audio-only capture with microphone **and** system audio,
   using the existing transcription, upload, and privacy settings. On KDE, enable
   microphone capture in Settings first. No audio is captured before acceptance.
-- Leaving for ten confirmed seconds stops only the recording started by that
-  prompt. A debugger outage does not count as leaving; use Recgo's Stop control
-  if detection is unavailable. A manual stop suppresses restarting that call.
+- Leaving the call, closing its tab, or quitting the browser, for ten confirmed
+  seconds, stops only the recording started by that prompt. A quit browser is a
+  debugging port that refuses the connection; a debugger that answers but fails
+  or times out is an outage and does not count as leaving, so use Recgo's Stop
+  control if detection is unavailable. A manual stop suppresses restarting that
+  call.
 - Existing manual recordings are untouched. Disabling detection hands any active
   Meet recording back to manual control.
 
@@ -359,6 +372,19 @@ Unavailable system audio is an error for Meet recordings, rather than a silent
 fallback to recording only your side.
 
 For diagnostics, `recgo-meet-watch -once` prints a JSON snapshot and exits without
-recording or prompting. The running KDE app also reports `meet=watching` or
-`meet=browser_unavailable` in `recgo-app --status`. The helper speaks newline JSON
-on stdout for the shells and is included in both the Nix package and Mac bundle.
+recording or prompting. The running KDE app also reports the detector in
+`recgo-app --status` as one of:
+
+- `meet=watching`: the browser's debugger answers and joined calls are tracked.
+- `meet=nothing_on_port_9222`: no browser listens on the debugging port; the
+  browser is closed or was started without `--remote-debugging-port=9222`.
+- `meet=browser_unavailable`: the debugger answered but failed or timed out, or
+  the helper has been silent for 8 seconds; also shown for its first 10 seconds.
+- `meet=connecting`: the helper has just been started.
+- `meet=disabled`: **Ask to record Google Meet calls** is off.
+- `meet=helper_missing`: `recgo-meet-watch` is not in the helper directory or on `PATH`.
+- `meet=detector_stopped`: the helper exited; the app starts it again within 2 seconds.
+- `meet=invalid_detector_response`: the helper printed a line that is not a snapshot.
+
+The helper speaks newline JSON on stdout for the shells and is included in both
+the Nix package and Mac bundle.

@@ -78,7 +78,6 @@ def font(size, weight=QFont.Weight.Normal, mono=False):
 
 def arrow_icon_path():
     import os
-    from PySide6.QtCore import QRectF
     from PySide6.QtGui import QPainter, QPen, QPixmap
     base = os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR") or "/tmp"
     path = os.path.join(base, "recgo-chevron.png")

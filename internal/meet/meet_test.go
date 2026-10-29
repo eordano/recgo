@@ -3,15 +3,19 @@ package meet
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 func TestMeetOrigin(t *testing.T) {
@@ -61,6 +65,47 @@ func TestDebounceReconnectAndUnknown(t *testing.T) {
 	}
 }
 
+func TestObserveQuitBrowserVersusOutage(t *testing.T) {
+	base := time.Now()
+	call := []Call{{ID: "one", URL: "https://meet.google.com/abc-defg-hij", Present: true}}
+	joined := func() *Tracker {
+		var tracker Tracker
+		tracker.Observe(base, call, nil)
+		if len(tracker.Observe(base.Add(2*time.Second), call, nil).Calls) != 1 {
+			t.Fatal("missed join")
+		}
+		return &tracker
+	}
+	quit := joined()
+	for _, sec := range []int{4, 13} {
+		if s := quit.Observe(base.Add(time.Duration(sec)*time.Second), nil, ErrNoBrowser); !s.Available || s.Browser || len(s.Calls) != 1 {
+			t.Fatal("a quit browser must debounce like leaving", sec, s)
+		}
+	}
+	s := quit.Observe(base.Add(14*time.Second), nil, ErrNoBrowser)
+	if b, _ := json.Marshal(s); string(b) != `{"available":true,"browser":false,"calls":[]}` {
+		t.Fatal("a quit browser must end the call", string(b))
+	}
+	outage := joined()
+	for _, sec := range []int{4, 40} {
+		if s := outage.Observe(base.Add(time.Duration(sec)*time.Second), nil, errors.New("CDP returned 503")); s.Available || !s.Browser || len(s.Calls) != 1 {
+			t.Fatal("an outage is unknown, not a quit browser", sec, s)
+		}
+	}
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{nil, `{"available":true,"browser":true,"calls":[]}`},
+		{ErrNoBrowser, `{"available":true,"browser":false,"calls":[]}`},
+		{errors.New("CDP returned 503"), `{"available":false,"browser":true,"calls":[]}`},
+	} {
+		if b, _ := json.Marshal(Classify(nil, tc.err)); string(b) != tc.want {
+			t.Errorf("Classify(%v) = %s, want %s", tc.err, b, tc.want)
+		}
+	}
+}
+
 func TestInterruptedJoinAndMultipleCalls(t *testing.T) {
 	var tracker Tracker
 	base := time.Now()
@@ -98,25 +143,26 @@ func TestProbeCDP(t *testing.T) {
 					json.NewEncoder(w).Encode([]target{{ID: "t", Type: "page", URL: "https://meet.google.com/abc-defg-hij?authuser=2", Title: "Meet – Weekly sync", WS: strings.Replace(server.URL, "http:", "ws:", 1) + "/devtools/page/t"}, {ID: "skip", Type: "page", URL: "https://example.com", WS: "ws://off-host/"}})
 					return
 				}
-				c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+				c, err := websocket.Accept(w, r, nil)
 				if err != nil {
 					t.Error(err)
 					return
 				}
-				defer c.Close()
+				defer c.CloseNow()
+				c.SetReadLimit(-1)
 				var request struct {
 					Method string
 					Params struct{ Expression string }
 				}
-				if err := c.ReadJSON(&request); err != nil {
+				if err := wsjson.Read(r.Context(), c, &request); err != nil {
 					t.Error(err)
 					return
 				}
 				if request.Method != "Runtime.evaluate" || request.Params.Expression != Expression {
 					t.Error("wrong evaluation")
 				}
-				c.WriteJSON(map[string]any{"method": "Runtime.executionContextCreated"})
-				c.WriteMessage(websocket.TextMessage, []byte(tc.response))
+				wsjson.Write(r.Context(), c, map[string]any{"method": "Runtime.executionContextCreated"})
+				c.Write(r.Context(), websocket.MessageText, []byte(tc.response))
 			}))
 			defer server.Close()
 			u, _ := url.Parse(server.URL)
@@ -132,6 +178,30 @@ func TestProbeCDP(t *testing.T) {
 				t.Fatal(calls)
 			}
 		})
+	}
+}
+
+func TestProbeQuitBrowserIsNotAnOutage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses with WSAECONNREFUSED; recgo-meet-watch ships only for Linux and macOS")
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	if _, err := Probe(context.Background(), port); !errors.Is(err, ErrNoBrowser) {
+		t.Fatalf("err=%v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	port, _ = strconv.Atoi(u.Port())
+	if _, err := Probe(context.Background(), port); err == nil || errors.Is(err, ErrNoBrowser) {
+		t.Fatalf("an answering debugger is an outage, not a quit browser: %v", err)
 	}
 }
 

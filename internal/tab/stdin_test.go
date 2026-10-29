@@ -39,7 +39,7 @@ func TestMicFFmpegArgsMixesMonitor(t *testing.T) {
 	mixed := strings.Join(micFFmpegArgs("mic", "out.monitor"), " ")
 	micIn := strings.Join(audio.FFmpegInputArgs("mic"), " ")
 	monIn := strings.Join(audio.FFmpegMonitorInputArgs("out.monitor"), " ")
-	for _, want := range []string{micIn, monIn, "amix=inputs=2", "normalize=0",
+	for _, want := range []string{micIn, monIn, "[1:a]" + audio.MonitorGapFill, "amix=inputs=2", "normalize=0",
 		"-map [a]", "-ac 1 -ar 16000 -f s16le pipe:1"} {
 		if !strings.Contains(mixed, want) {
 			t.Fatalf("mixed args missing %q: %s", want, mixed)

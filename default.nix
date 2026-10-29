@@ -2,7 +2,7 @@
   lib,
   stdenv,
   stdenvNoCC,
-  buildGoModule,
+  buildGoLatestModule,
   ffmpeg-full,
   chromium,
   whisper-cpp,
@@ -22,7 +22,7 @@ let
     withWhisper = false;
     withFrei0r = false;
   };
-  binary = buildGoModule {
+  binary = buildGoLatestModule {
     pname = "recgo";
     version = "0.1.0";
     src = lib.fileset.toSource {
@@ -35,7 +35,7 @@ let
       ];
     };
 
-    vendorHash = "sha256-CSO0qBt/87wAygdcOOs5FuL5tlrjE9yUMs1E5Z+3TV4=";
+    vendorHash = "sha256-ukaXhVbG4G9m6TfALS53V8K4CTN33anRZDt8e/8Q+vU=";
 
     __darwinAllowLocalNetworking = true;
   };

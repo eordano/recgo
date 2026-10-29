@@ -57,9 +57,8 @@ type Model struct {
 	micMonitor   *audio.LevelMonitor
 	monMonitor   *audio.LevelMonitor
 
-	recorder    *audio.Recorder
-	stats       audio.RecordingStats
-	virtualSink *audio.VirtualSink
+	recorder *audio.Recorder
+	stats    audio.RecordingStats
 
 	savedOutput string
 
@@ -296,6 +295,20 @@ func waitForSinkChange(ch <-chan string) tea.Cmd {
 	}
 }
 
+// While a Bluetooth sink is torn down and recreated, WirePlumber points the
+// default at another sink for about a second; only where it settles counts.
+const sinkSettleDelay = 1500 * time.Millisecond
+
+var readDefaultSink = audio.GetDefaultSink
+
+func settleDefaultSink(after time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(after)
+		sink, err := readDefaultSink()
+		return sinkSettledMsg{sink: sink, err: err}
+	}
+}
+
 type devicesLoadedMsg struct {
 	mics     []audio.Device
 	monitors []audio.Device
@@ -306,7 +319,6 @@ type recordingStartedMsg struct {
 	err           error
 	startTime     time.Time
 	recorder      *audio.Recorder
-	virtualSink   *audio.VirtualSink
 	monitorSource string
 }
 
@@ -337,6 +349,11 @@ type sinkWatcherReadyMsg struct {
 
 type defaultSinkChangedMsg struct {
 	newSink string
+}
+
+type sinkSettledMsg struct {
+	sink string
+	err  error
 }
 
 type transcribeSource int

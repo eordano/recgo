@@ -79,7 +79,10 @@ class MeetWatcher(QObject):
             self.close_prompt()
             return
         self.last_update = time.monotonic()
-        self.status = "watching" if snapshot["available"] else "browser unavailable"
+        if not snapshot["available"]:
+            self.status = "browser unavailable"
+        else:
+            self.status = "watching" if snapshot.get("browser", True) else "nothing on port 9222"
         calls = {c["id"]: c for c in snapshot["calls"]}
         self.calls = calls if snapshot["available"] else {}
         # Unknown keeps consent and ownership, but never permits a stale prompt.
@@ -103,7 +106,8 @@ class MeetWatcher(QObject):
         box.setWindowTitle("Recgo — Google Meet")
         box.setText("Record this Meet call?")
         box.setInformativeText(call["url"] + "\n\nRecords your microphone and system audio as "
-                               "`recgo <name>` does, then stops when you leave. Uses your transcription "
+                               "`recgo <name>` does, then stops when you leave the call, close its tab "
+                               "or quit the browser. Uses your transcription "
                                "and sharing settings.\n\nRecording name:")
         edit = QLineEdit(suggested_name(call))
         edit.setPlaceholderText("meet")

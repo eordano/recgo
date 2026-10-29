@@ -9,6 +9,7 @@
 package alt
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -19,14 +20,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 const (
 	// Close codes the AltTester driver SDK understands.
-	closeAppLost  = 4002 // altrelay.py: "App disconnected"
-	closeReplaced = 4003
-	closeRefused  = 4001
+	closeAppLost  websocket.StatusCode = 4002 // altrelay.py: "App disconnected"
+	closeReplaced websocket.StatusCode = 4003
+	closeRefused  websocket.StatusCode = 4001
 
 	// Frames an unpaired side sends are held until it is paired; a Unity
 	// build streams notifications, so the queue is capped.
@@ -60,11 +61,10 @@ type Options struct {
 
 // Server is the listener both AltTester ends dial.
 type Server struct {
-	opts     Options
-	ln       net.Listener
-	srv      *http.Server
-	upgrader websocket.Upgrader
-	driver   *Driver
+	opts   Options
+	ln     net.Listener
+	srv    *http.Server
+	driver *Driver
 
 	mu      sync.Mutex
 	app     *appConn
@@ -75,7 +75,6 @@ type Server struct {
 type appConn struct {
 	ws      *websocket.Conn
 	info    AppInfo
-	wmu     sync.Mutex
 	mate    *extDriver
 	pending []string
 	done    chan struct{}
@@ -83,45 +82,41 @@ type appConn struct {
 }
 
 func (a *appConn) send(text string) error {
-	a.wmu.Lock()
-	defer a.wmu.Unlock()
-	return a.ws.WriteMessage(websocket.TextMessage, []byte(text))
+	return a.ws.Write(context.Background(), websocket.MessageText, []byte(text))
 }
 
-func (a *appConn) close(code int, reason string) {
-	a.once.Do(func() {
-		a.wmu.Lock()
-		_ = a.ws.WriteControl(websocket.CloseMessage,
-			websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
-		a.wmu.Unlock()
-		_ = a.ws.Close()
-	})
+func (a *appConn) close(code websocket.StatusCode, reason string) {
+	a.once.Do(func() { closeWithin(a.ws, code, reason) })
 }
 
 type extDriver struct {
 	ws      *websocket.Conn
 	id      string
 	appName string
-	wmu     sync.Mutex
 	mate    *appConn
 	pending []string
 	once    sync.Once
 }
 
 func (d *extDriver) send(text string) error {
-	d.wmu.Lock()
-	defer d.wmu.Unlock()
-	return d.ws.WriteMessage(websocket.TextMessage, []byte(text))
+	return d.ws.Write(context.Background(), websocket.MessageText, []byte(text))
 }
 
-func (d *extDriver) close(code int, reason string) {
-	d.once.Do(func() {
-		d.wmu.Lock()
-		_ = d.ws.WriteControl(websocket.CloseMessage,
-			websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
-		d.wmu.Unlock()
-		_ = d.ws.Close()
-	})
+func (d *extDriver) close(code websocket.StatusCode, reason string) {
+	d.once.Do(func() { closeWithin(d.ws, code, reason) })
+}
+
+func closeWithin(ws *websocket.Conn, code websocket.StatusCode, reason string) {
+	done := make(chan struct{})
+	go func() {
+		_ = ws.Close(code, reason)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		_ = ws.CloseNow()
+	}
 }
 
 // Listen binds host:port and starts serving. A taken port is refused with
@@ -141,10 +136,9 @@ func Listen(opts Options) (*Server, error) {
 			"  or stop whatever else owns it (AltTester Desktop, or a relay of your own)", addr, err)
 	}
 	s := &Server{
-		opts:     opts,
-		ln:       ln,
-		upgrader: websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
-		driver:   newDriver(newID()),
+		opts:   opts,
+		ln:     ln,
+		driver: newDriver(newID()),
 	}
 	s.srv = &http.Server{Handler: http.HandlerFunc(s.serveHTTP)}
 	go func() { _ = s.srv.Serve(ln) }()
@@ -175,10 +169,10 @@ func (s *Server) Close() error {
 	drivers := append([]*extDriver(nil), s.drivers...)
 	s.mu.Unlock()
 	if app != nil {
-		app.close(websocket.CloseGoingAway, "recgo stopped")
+		app.close(websocket.StatusGoingAway, "recgo stopped")
 	}
 	for _, d := range drivers {
-		d.close(websocket.CloseGoingAway, "recgo stopped")
+		d.close(websocket.StatusGoingAway, "recgo stopped")
 	}
 	return s.srv.Close()
 }
@@ -201,10 +195,11 @@ func (s *Server) serveApp(w http.ResponseWriter, r *http.Request) {
 		Name: q.Get("appName"), Platform: q.Get("platform"), PlatformVersion: q.Get("platformVersion"),
 		DeviceInstanceID: q.Get("deviceInstanceId"), AppID: q.Get("appId"),
 	}
-	ws, err := s.upgrader.Upgrade(w, r, nil)
+	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return
 	}
+	ws.SetReadLimit(-1)
 	a := &appConn{ws: ws, info: info, done: make(chan struct{})}
 	if s.opts.AppName != "" && info.Name != s.opts.AppName {
 		s.opts.Log("alt: refusing app %q (--alt-app %s)", info.Name, s.opts.AppName)
@@ -214,7 +209,7 @@ func (s *Server) serveApp(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		a.close(websocket.CloseGoingAway, "recgo stopped")
+		a.close(websocket.StatusGoingAway, "recgo stopped")
 		return
 	}
 	old := s.app
@@ -234,7 +229,7 @@ func (s *Server) serveApp(w http.ResponseWriter, r *http.Request) {
 		go s.opts.OnApp(info)
 	}
 	for {
-		_, data, err := ws.ReadMessage()
+		_, data, err := ws.Read(context.Background())
 		if err != nil {
 			break
 		}
@@ -273,7 +268,7 @@ func (s *Server) appGone(a *appConn) {
 	}
 	s.driver.detach(a)
 	s.mu.Unlock()
-	a.close(websocket.CloseNormalClosure, "")
+	a.close(websocket.StatusNormalClosure, "")
 	close(a.done)
 	if mate != nil {
 		mate.close(closeAppLost, "App disconnected")
@@ -284,15 +279,16 @@ func (s *Server) appGone(a *appConn) {
 }
 
 func (s *Server) serveDriver(w http.ResponseWriter, r *http.Request) {
-	ws, err := s.upgrader.Upgrade(w, r, nil)
+	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return
 	}
+	ws.SetReadLimit(-1)
 	d := &extDriver{ws: ws, id: newID(), appName: r.URL.Query().Get("appName")}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		d.close(websocket.CloseGoingAway, "recgo stopped")
+		d.close(websocket.StatusGoingAway, "recgo stopped")
 		return
 	}
 	s.drivers = append(s.drivers, d)
@@ -300,7 +296,7 @@ func (s *Server) serveDriver(w http.ResponseWriter, r *http.Request) {
 	s.opts.Log("alt: external driver connected (appName=%q)", d.appName)
 	s.pair()
 	for {
-		_, data, err := ws.ReadMessage()
+		_, data, err := ws.Read(context.Background())
 		if err != nil {
 			break
 		}
@@ -335,7 +331,7 @@ func (s *Server) driverGone(d *extDriver) {
 		app.mate = nil
 	}
 	s.mu.Unlock()
-	d.close(websocket.CloseNormalClosure, "")
+	d.close(websocket.StatusNormalClosure, "")
 	if app != nil {
 		_ = app.send(notification("DriverDisconnectedNotification", d.id))
 	}
